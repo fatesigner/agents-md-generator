@@ -1,0 +1,7 @@
+interface:
+  display_name: "Database Profile Operations"
+  short_description: "Safely access live databases via profiles"
+  default_prompt: "Use $operate-database-profiles to safely inspect or operate the current project's database."
+
+policy:
+  allow_implicit_invocation: true

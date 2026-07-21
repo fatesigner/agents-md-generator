@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Tools Routing"
+  short_description: "Route PDF, Office, OCR, and parsing tasks."
+  default_prompt: "Use $document-tools-routing to choose and execute the right document processing workflow."

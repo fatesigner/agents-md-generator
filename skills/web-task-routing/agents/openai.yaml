@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Task Routing"
+  short_description: "Choose web or browser automation paths."
+  default_prompt: "Use $web-task-routing to choose and execute the right web or browser automation workflow."

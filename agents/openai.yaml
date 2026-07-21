@@ -1,0 +1,4 @@
+interface:
+  display_name: "AGENTS 生成器"
+  short_description: "按模板生成项目 AGENTS.md"
+  default_prompt: "Use $agents-md-generator to generate or adapt an AGENTS.md for a specific project from the repository template."
