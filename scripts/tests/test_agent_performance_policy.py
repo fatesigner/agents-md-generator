@@ -30,11 +30,24 @@ class AgentPerformancePolicyTests(unittest.TestCase):
         self.subagents_policy = (
             PROJECT_ROOT / "references" / "subagents-policy.md"
         ).read_text(encoding="utf-8")
+        self.performance_policy = (
+            PROJECT_ROOT / "references" / "performance-policy.md"
+        ).read_text(encoding="utf-8")
+        self.safety_policy = (
+            PROJECT_ROOT / "references" / "safety-policy.md"
+        ).read_text(encoding="utf-8")
+        self.workflow_policy = (
+            PROJECT_ROOT / "references" / "workflow-policy.md"
+        ).read_text(encoding="utf-8")
 
-    def test_global_template_uses_adaptive_parallelism(self) -> None:
+    def test_global_template_keeps_adaptive_parallelism_lazy(self) -> None:
         self.assertIn("端到端壁钟时间", self.global_template)
-        self.assertIn('fork_turns: "none"', self.global_template)
-        self.assertIn("首批默认 1 个 subagent", self.global_template)
+        self.assertIn("references/subagents-policy.md", self.global_template)
+        self.assertIn("references/performance-policy.md", self.global_template)
+        self.assertNotIn('fork_turns: "none"', self.global_template)
+        self.assertNotIn("首批默认 1 个 subagent", self.global_template)
+        self.assertIn('fork_turns: "none"', self.subagents_policy)
+        self.assertIn("首批默认 1 个 subagent", self.subagents_policy)
         self.assertNotIn("速度优先的强触发分发", self.global_template)
         self.assertNotIn("多面任务默认 2-4 个 subagents", self.global_template)
 
@@ -75,17 +88,72 @@ class AgentPerformancePolicyTests(unittest.TestCase):
         self.assertTrue(
             {
                 "performance-policy.md",
+                "safety-policy.md",
                 "search-policy.md",
                 "session-policy.md",
                 "subagents-policy.md",
+                "workflow-policy.md",
             }.issubset(discovered)
         )
 
     def test_global_template_stays_below_prompt_size_budget(self) -> None:
         self.assertLessEqual(
             len(self.global_template.encode("utf-8")),
-            24_500,
+            16_000,
         )
+
+    def test_global_template_preserves_critical_gates(self) -> None:
+        for marker in (
+            "git push",
+            "生产写入",
+            "同类失败连续 3 次",
+            "读取敏感原文",
+            "$operate-database-profiles",
+            "--allow-production",
+            "改动文件、验证结果、已知风险",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.global_template)
+
+        self.assertIn("references/safety-policy.md", self.global_template)
+        self.assertNotIn("`.env.*`", self.global_template)
+        self.assertNotIn("`.git-credentials`", self.global_template)
+
+    def test_safety_policy_preserves_exact_sensitive_targets(self) -> None:
+        for marker in (
+            ".env.*",
+            "appsettings.*.json",
+            ".git-credentials",
+            ".dockerconfigjson",
+            ".ssh",
+            "数据库备份",
+            "客户数据",
+            "git push",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.safety_policy)
+
+    def test_workflow_policy_captures_long_running_contract(self) -> None:
+        for marker in (
+            "目标：",
+            "完成标准：",
+            "授权边界：",
+            "durable thread",
+            "Steer",
+            "Queue",
+            "New thread",
+            "Automation",
+            "Fast mode",
+            "Artifact 审阅",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.workflow_policy)
+
+    def test_performance_policy_rejects_global_max_speed_defaults(self) -> None:
+        self.assertIn("Fast mode", self.performance_policy)
+        self.assertIn("全局默认值", self.performance_policy)
+        self.assertIn("token/credit", self.performance_policy)
+        self.assertIn("返工次数", self.performance_policy)
 
     def test_global_rules_and_lazy_references_sync_in_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -105,12 +173,14 @@ class AgentPerformancePolicyTests(unittest.TestCase):
                 )
 
             self.assertEqual(global_target.read_text(encoding="utf-8"), self.global_template)
-            self.assertGreaterEqual(synced_count, 8)
+            self.assertGreaterEqual(synced_count, 10)
             for name in (
                 "performance-policy.md",
+                "safety-policy.md",
                 "search-policy.md",
                 "session-policy.md",
                 "subagents-policy.md",
+                "workflow-policy.md",
             ):
                 self.assertEqual(
                     (references_target / name).read_text(encoding="utf-8"),

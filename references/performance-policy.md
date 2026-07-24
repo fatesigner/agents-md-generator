@@ -37,6 +37,9 @@
 
 - `[DEFAULT]` 入口定位、范围收敛和短只读核对使用快速模型与 `low` 或 `medium`；普通实现和测试使用 `medium`；高风险裁决或深度调试按需使用 `high`。
 - `[MUST]` `xhigh` 只用于已收敛的单一裁决点，不用于首轮探索。
+- `[MUST NOT]` 不把最高 reasoning、Fast mode 或高价 service tier 设为所有任务的全局默认值。
+- `[DEFAULT]` Fast mode 只用于用户正在等待的交互关键路径；后台批量、自动化和高吞吐任务优先控制成本。
+- `[MUST]` 调整模型、reasoning 或速度模式时，先保留当前有效基线，再在同一批代表任务上比较同一档与低一档；不得以单次主观体验宣称提速。
 - `[MUST]` subagent 默认 `fork_turns: "none"` 并使用最小任务包；只有任务依赖近期或完整决策历史时才扩大上下文。
 
 ## 度量与 A/B 验证
@@ -48,7 +51,8 @@
 - 主代理空等时间占比；
 - subagent 结果采纳率与 spawn 失败率；
 - 重复读取、重复验证和共享写入冲突次数；
-- 平均每任务 subagent 数与实际 speedup。
+- 平均每任务 subagent 数与实际 speedup；
+- token/credit 消耗、返工次数与最终验证通过率。
 
 - `[MUST]` 性能留痕写入目标项目既有本地产物目录；未声明时使用 `.codex/perf/`，不得包含 prompt 全文、源码全文、日志全文或敏感数据。
 - `[DEFAULT]` 单条记录仅保留任务类型、范围等级、耗时、subagent 数、结果是否采纳、等待耗时、失败数和验证类型。

@@ -147,7 +147,7 @@ When the task requires syncing this skill package's global assets to the user-le
 Use layered inheritance for generated files:
 
 - Global baseline: `references/global-template.md`
-- Global policy references: `references/subagents-policy.md`, `references/performance-policy.md`, `references/search-policy.md`, `references/session-policy.md`, `references/web-task-policy.md`, `references/document-tools-policy.md`, `references/tool-report-policy.md`, `references/commit-policy.md`
+- Global policy references: `references/safety-policy.md`, `references/workflow-policy.md`, `references/subagents-policy.md`, `references/performance-policy.md`, `references/search-policy.md`, `references/session-policy.md`, `references/web-task-policy.md`, `references/document-tools-policy.md`, `references/tool-report-policy.md`, `references/commit-policy.md`
 - Skill-backed global workflows: `$web-task-routing`, `$document-tools-routing`, `$operate-database-profiles`
 - Root template: `references/root-template.md`
 - Child templates: `references/dotnet-backend-child-template.md`, `references/nestjs-backend-child-template.md`, `references/spring-boot-backend-child-template.md`, `references/frontend-child-template.md`, `references/userscripts-child-template.md`
@@ -220,7 +220,7 @@ Use a shallow, targeted collection strategy.
    - other child project `AGENTS.md`
 2. Select the fixed template:
    - global baseline: `references/global-template.md` (inheritance source)
-   - global policy references: `references/subagents-policy.md`, `references/performance-policy.md`, `references/search-policy.md`, `references/session-policy.md`, `references/web-task-policy.md`, `references/document-tools-policy.md`, `references/tool-report-policy.md`, `references/commit-policy.md`
+   - global policy references: `references/safety-policy.md`, `references/workflow-policy.md`, `references/subagents-policy.md`, `references/performance-policy.md`, `references/search-policy.md`, `references/session-policy.md`, `references/web-task-policy.md`, `references/document-tools-policy.md`, `references/tool-report-policy.md`, `references/commit-policy.md`
    - skill-backed global workflows: `$web-task-routing`, `$document-tools-routing`, `$operate-database-profiles`
    - root: `references/root-template.md`
    - .NET back-end child: `references/dotnet-backend-child-template.md`
@@ -373,7 +373,7 @@ If the user asks to add, remove, or rename a section:
 Read as needed:
 
 - Global baseline template: `references/global-template.md`
-- Global policy references: `references/subagents-policy.md`, `references/performance-policy.md`, `references/search-policy.md`, `references/session-policy.md`, `references/web-task-policy.md`, `references/document-tools-policy.md`, `references/tool-report-policy.md`, `references/commit-policy.md`
+- Global policy references: `references/safety-policy.md`, `references/workflow-policy.md`, `references/subagents-policy.md`, `references/performance-policy.md`, `references/search-policy.md`, `references/session-policy.md`, `references/web-task-policy.md`, `references/document-tools-policy.md`, `references/tool-report-policy.md`, `references/commit-policy.md`
 - Root template: `references/root-template.md`
 - .NET back-end child template: `references/dotnet-backend-child-template.md`
 - NestJS back-end child template: `references/nestjs-backend-child-template.md`

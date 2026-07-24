@@ -19,7 +19,7 @@ Treat AGENTS generation as a deterministic rendering task constrained by templat
 
 - The section structure is defined directly by the selected template file.
 - Global baseline template -> `global-template.md` (for inherited stable rules)
-- Global policy references -> `subagents-policy.md`, `web-task-policy.md`, `document-tools-policy.md`, `tool-report-policy.md`, `commit-policy.md`
+- Global policy references -> `safety-policy.md`, `workflow-policy.md`, `subagents-policy.md`, `performance-policy.md`, `search-policy.md`, `session-policy.md`, `web-task-policy.md`, `document-tools-policy.md`, `tool-report-policy.md`, `commit-policy.md`
 - Root file -> `root-template.md`
 - .NET back-end child file -> `dotnet-backend-child-template.md`
 - NestJS back-end child file -> `nestjs-backend-child-template.md`
@@ -166,7 +166,7 @@ When a task needs a suite manifest but the repository layout is conventional:
 ## Selection rules
 
 - Global baseline reference -> `global-template.md`
-- Global policy references -> `subagents-policy.md`, `web-task-policy.md`, `document-tools-policy.md`, `tool-report-policy.md`, `commit-policy.md`
+- Global policy references -> `safety-policy.md`, `workflow-policy.md`, `subagents-policy.md`, `performance-policy.md`, `search-policy.md`, `session-policy.md`, `web-task-policy.md`, `document-tools-policy.md`, `tool-report-policy.md`, `commit-policy.md`
 - Skill-backed workflows -> `$web-task-routing`, `$document-tools-routing`
 - Root file -> `root-template.md`
 - .NET back-end child file -> `dotnet-backend-child-template.md`
