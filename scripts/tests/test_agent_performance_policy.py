@@ -96,6 +96,16 @@ class AgentPerformancePolicyTests(unittest.TestCase):
             }.issubset(discovered)
         )
 
+    def test_global_reference_paths_use_codex_home_not_project_cwd(self) -> None:
+        self.assertIn(
+            "用户级 Codex 目录 `${CODEX_HOME:-~/.codex}`",
+            self.global_template,
+        )
+        self.assertIn(
+            "不得相对当前仓库、目标项目或工作目录解析",
+            self.global_template,
+        )
+
     def test_global_template_stays_below_prompt_size_budget(self) -> None:
         self.assertLessEqual(
             len(self.global_template.encode("utf-8")),
