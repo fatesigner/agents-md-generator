@@ -213,11 +213,16 @@ class AgentPerformancePolicyTests(unittest.TestCase):
             self.assertGreater(subagent_count, 100)
             self.assertGreaterEqual(skill_count, 4)
             self.assertTrue((target_root / "agents" / "reviewer.toml").is_file())
+            runtime_skill_target = target_root / "skills" / "agents-md-generator"
+            self.assertTrue(
+                (runtime_skill_target / "scripts" / "sync_codex_assets.py").is_file()
+            )
+            for entry_script in ("sync_codex_assets.cmd", "sync_codex_assets.sh"):
+                with self.subTest(entry_script=entry_script):
+                    self.assertFalse((runtime_skill_target / entry_script).exists())
             self.assertEqual(
                 (
-                    target_root
-                    / "skills"
-                    / "agents-md-generator"
+                    runtime_skill_target
                     / "references"
                     / "performance-policy.md"
                 ).read_text(encoding="utf-8"),

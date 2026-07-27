@@ -17,8 +17,6 @@ PROJECT_SKILL_ASSETS = (
     "scripts",
     "skills",
     "subagents-main",
-    "sync_codex_assets.cmd",
-    "sync_codex_assets.sh",
 )
 PROJECT_SKILL_ASSET_EXCLUDES: dict[str, tuple[str, ...]] = {}
 

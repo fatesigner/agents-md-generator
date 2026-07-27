@@ -138,7 +138,7 @@ When the task requires syncing this skill package's global assets to the user-le
   - syncs global policy references used by `references/global-template.md` into `${CODEX_HOME:-~/.codex}/references/`
   - flattens `subagents-main/**/*.toml` into `${CODEX_HOME:-~/.codex}/agents/`
   - syncs this top-level `agents-md-generator` skill runtime assets into `${CODEX_HOME:-~/.codex}/skills/agents-md-generator/`
-  - includes the Python sync implementation, source subagents, and macOS/Linux and Windows entry scripts in the installed skill runtime package so it can sync another machine without the original repository checkout
+  - includes the Python sync implementation and source subagents in the installed skill runtime package; keeps the macOS/Linux and Windows entry scripts in the source checkout only
   - syncs local nested `skills/*/` directories into `${CODEX_HOME:-~/.codex}/skills/`
   - accepts no command-line parameters; running the script always syncs all assets
 
