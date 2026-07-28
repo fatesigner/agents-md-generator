@@ -15,8 +15,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, NamedTuple, Optional, Union
 
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -27,7 +28,24 @@ PRODUCTION_MAX_FIELD_WIDTH = 256
 PRODUCTION_MAX_OUTPUT_BYTES = 64 * 1024
 PRODUCTION_QUERY_TIMEOUT_SECONDS = 30
 PRODUCTION_LOCK_TIMEOUT_MS = 5000
+MAX_SQL_FILE_BYTES = 1024 * 1024
 SUPPORTED_ENGINES = {"postgresql", "sqlserver"}
+
+
+class SqlSnapshot(NamedTuple):
+    path: Path
+    text: str
+
+
+class SqlToken(NamedTuple):
+    kind: str
+    value: str
+    start: int
+    end: int
+
+    @property
+    def is_identifier(self) -> bool:
+        return self.kind in {"word", "quoted-identifier", "unicode-quoted-identifier"}
 
 
 class DbctlError(Exception):
@@ -502,10 +520,74 @@ def resolve_password(profile: dict[str, Any]) -> str:
     return secret_provider().get(profile["secretRef"])
 
 
-def find_sqlcmd() -> Path:
+def trusted_windows_program_roots() -> list[Path]:
+    try:
+        import winreg
+    except ImportError:
+        die("trusted Windows installation roots could not be resolved")
+
+    roots: list[Path] = []
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+        ) as key:
+            for value_name in (
+                "ProgramFilesDir",
+                "ProgramFilesDir (x86)",
+                "ProgramFilesDir (Arm)",
+            ):
+                try:
+                    value, _ = winreg.QueryValueEx(key, value_name)
+                except OSError:
+                    continue
+                if isinstance(value, str) and value:
+                    try:
+                        root = Path(value).resolve(strict=True)
+                    except OSError:
+                        continue
+                    if root not in roots:
+                        roots.append(root)
+    except OSError:
+        die("trusted Windows installation roots could not be resolved")
+    if not roots:
+        die("trusted Windows installation roots could not be resolved")
+    return roots
+
+
+def validate_production_client_path(path: Path) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        info = resolved.stat()
+    except OSError:
+        die("production database client path could not be validated")
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        die("production database client is not executable")
+    if os.name == "nt":
+        approved_roots = trusted_windows_program_roots()
+        if not any(
+            resolved == root or root in resolved.parents
+            for root in approved_roots
+        ):
+            die("production database client must be installed under Program Files")
+    else:
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            die("production database client cannot be group- or world-writable")
+        approved_roots = [Path("/usr"), Path("/opt")]
+        if not any(
+            resolved == root or root in resolved.parents
+            for root in approved_roots
+        ):
+            die("production database client must be installed under /usr or /opt")
+    return resolved
+
+
+def find_sqlcmd(*, production: bool = False) -> Path:
     configured = os.environ.get("DBCTL_SQLCMD")
     candidates: list[Path] = []
     if configured:
+        if production:
+            die("DBCTL_SQLCMD override is not allowed for production targets")
         configured_path = Path(configured).expanduser()
         if not configured_path.is_absolute():
             die("DBCTL_SQLCMD must be an absolute path")
@@ -518,14 +600,16 @@ def find_sqlcmd() -> Path:
             candidates.append(Path(discovered))
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
+            return validate_production_client_path(candidate) if production else candidate
     die("sqlcmd is not installed at an approved path")
 
 
-def find_psql() -> Path:
+def find_psql(*, production: bool = False) -> Path:
     configured = os.environ.get("DBCTL_PSQL")
     candidates: list[Path] = []
     if configured:
+        if production:
+            die("DBCTL_PSQL override is not allowed for production targets")
         configured_path = Path(configured).expanduser()
         if not configured_path.is_absolute():
             die("DBCTL_PSQL must be an absolute path")
@@ -544,19 +628,24 @@ def find_psql() -> Path:
         candidates.append(Path(discovered))
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
+            return validate_production_client_path(candidate) if production else candidate
     die("psql is not installed at an approved path")
 
 
-def find_database_client(engine: str) -> Path:
+def find_database_client(engine: str, *, production: bool = False) -> Path:
     if engine == "sqlserver":
-        return find_sqlcmd()
+        return find_sqlcmd(production=production)
     if engine == "postgresql":
-        return find_psql()
+        return find_psql(production=production)
     die("database engine is not supported")
 
 
-def validate_sql_file(sql_file: str, query_root: Path) -> Path:
+def load_sql_snapshot(
+    sql_file: str,
+    query_root: Path,
+    *,
+    production: bool = False,
+) -> SqlSnapshot:
     path = Path(sql_file)
     if not path.is_absolute() or path.suffix.lower() != ".sql":
         die("SQL file must be an absolute .sql path")
@@ -570,16 +659,64 @@ def validate_sql_file(sql_file: str, query_root: Path) -> Path:
         resolved.relative_to(query_root)
     except ValueError:
         die("SQL file must be inside the configured query root")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor: Optional[int] = None
     try:
-        with resolved.open("r", encoding="utf-8-sig") as handle:
-            for line in handle:
-                if re.match(r"^\s*(?::|!!|\\)", line):
-                    die("database client meta-commands are not allowed")
-    except (OSError, UnicodeError):
+        descriptor = os.open(resolved, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            die("SQL file must be a regular file")
+        if before.st_size > MAX_SQL_FILE_BYTES:
+            die("SQL file exceeds the size limit")
+        if production and os.name != "nt" and before.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            die("production SQL file cannot be group- or world-writable")
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, MAX_SQL_FILE_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_SQL_FILE_BYTES:
+                die("SQL file exceeds the size limit")
+        after = os.fstat(descriptor)
+    except OSError:
         die("SQL file could not be validated")
-    if "\\" in visible_sql_text(read_sql_text(resolved)):
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    try:
+        current = resolved.lstat()
+    except OSError:
+        die("SQL file changed while it was being validated")
+    if (
+        current.st_dev != after.st_dev
+        or current.st_ino != after.st_ino
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+    ):
+        die("SQL file changed while it was being validated")
+
+    try:
+        text = b"".join(chunks).decode("utf-8-sig")
+    except UnicodeDecodeError:
+        die("SQL file could not be validated")
+    for line in text.splitlines():
+        if re.match(r"^\s*(?::|!!|\\)", line):
+            die("database client meta-commands are not allowed")
+    if "\\" in visible_sql_text(text):
         die("database client meta-commands are not allowed")
-    return resolved
+    return SqlSnapshot(path=resolved, text=text)
+
+
+def validate_sql_file(sql_file: str, query_root: Path) -> Path:
+    return load_sql_snapshot(sql_file, query_root).path
 
 
 def read_sql_text(sql_file: Path) -> str:
@@ -651,12 +788,190 @@ def visible_sql_text(text: str) -> str:
     return "".join(visible)
 
 
+def lex_sql(text: str) -> list[SqlToken]:
+    tokens: list[SqlToken] = []
+    position = 0
+
+    def quoted_identifier(start: int, opener_length: int, terminator: str) -> tuple[str, int]:
+        value: list[str] = []
+        cursor = start + opener_length
+        while cursor < len(text):
+            character = text[cursor]
+            following = text[cursor + 1] if cursor + 1 < len(text) else ""
+            if character == terminator:
+                if following == terminator:
+                    value.append(terminator)
+                    cursor += 2
+                    continue
+                return "".join(value), cursor + 1
+            value.append(character)
+            cursor += 1
+        die("SQL file contains an unterminated quoted identifier")
+
+    while position < len(text):
+        character = text[position]
+        following = text[position + 1] if position + 1 < len(text) else ""
+
+        if character.isspace():
+            position += 1
+            continue
+        if character == "-" and following == "-":
+            newline = text.find("\n", position + 2)
+            position = len(text) if newline < 0 else newline + 1
+            continue
+        if character == "/" and following == "*":
+            depth = 1
+            cursor = position + 2
+            while cursor < len(text) and depth:
+                pair = text[cursor : cursor + 2]
+                if pair == "/*":
+                    depth += 1
+                    cursor += 2
+                elif pair == "*/":
+                    depth -= 1
+                    cursor += 2
+                else:
+                    cursor += 1
+            if depth:
+                die("SQL file contains an unterminated comment")
+            position = cursor
+            continue
+        if (
+            character in {"E", "e"}
+            and following == "'"
+            and (position == 0 or not re.match(r"[A-Za-z0-9_$#@]", text[position - 1]))
+        ):
+            cursor = position + 2
+            while cursor < len(text):
+                if text[cursor] == "\\" and cursor + 1 < len(text):
+                    cursor += 2
+                elif text[cursor] == "'":
+                    if cursor + 1 < len(text) and text[cursor + 1] == "'":
+                        cursor += 2
+                    else:
+                        cursor += 1
+                        break
+                else:
+                    cursor += 1
+            else:
+                die("SQL file contains an unterminated string literal")
+            tokens.append(SqlToken("string", "", position, cursor))
+            position = cursor
+            continue
+        if character == "'":
+            cursor = position + 1
+            while cursor < len(text):
+                if text[cursor] == "'":
+                    if cursor + 1 < len(text) and text[cursor + 1] == "'":
+                        cursor += 2
+                    else:
+                        cursor += 1
+                        break
+                else:
+                    cursor += 1
+            else:
+                die("SQL file contains an unterminated string literal")
+            tokens.append(SqlToken("string", "", position, cursor))
+            position = cursor
+            continue
+        if character == "$":
+            delimiter_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", text[position:])
+            if delimiter_match:
+                delimiter = delimiter_match.group(0)
+                end = text.find(delimiter, position + len(delimiter))
+                if end < 0:
+                    die("SQL file contains an unterminated dollar-quoted string")
+                end += len(delimiter)
+                tokens.append(SqlToken("dollar-string", "", position, end))
+                position = end
+                continue
+        if (
+            character in {"U", "u"}
+            and text[position + 1 : position + 3] == '&"'
+            and (position == 0 or not re.match(r"[A-Za-z0-9_$#@]", text[position - 1]))
+        ):
+            value, end = quoted_identifier(position, 3, '"')
+            tokens.append(
+                SqlToken("unicode-quoted-identifier", value.upper(), position, end)
+            )
+            position = end
+            continue
+        if character == '"':
+            value, end = quoted_identifier(position, 1, '"')
+            tokens.append(SqlToken("quoted-identifier", value.upper(), position, end))
+            position = end
+            continue
+        if character == "[":
+            value, end = quoted_identifier(position, 1, "]")
+            tokens.append(SqlToken("quoted-identifier", value.upper(), position, end))
+            position = end
+            continue
+        word = re.match(r"[A-Za-z_][A-Za-z0-9_$#@]*", text[position:])
+        if word:
+            end = position + len(word.group(0))
+            tokens.append(SqlToken("word", word.group(0).upper(), position, end))
+            position = end
+            continue
+        tokens.append(SqlToken("symbol", character, position, position + 1))
+        position += 1
+    return tokens
+
+
 def executable_sql_tokens(sql_file: Path) -> list[str]:
-    visible = visible_sql_text(read_sql_text(sql_file))
-    return re.findall(r"[A-Za-z_][A-Za-z0-9_$#@]*", visible.upper())
+    return [
+        token.value
+        for token in lex_sql(read_sql_text(sql_file))
+        if token.kind == "word"
+    ]
 
 
-def validate_read_query(sql_file: Path, *, production: bool = False) -> None:
+def single_statement_sql_text(text: str) -> str:
+    semicolons = [
+        token.start
+        for token in lex_sql(text)
+        if token.kind == "symbol" and token.value == ";"
+    ]
+    boundaries = [-1, *semicolons, len(text)]
+    statements: list[str] = []
+    for index in range(len(boundaries) - 1):
+        statement = text[boundaries[index] + 1 : boundaries[index + 1]].strip()
+        if statement and lex_sql(statement):
+            statements.append(statement)
+    if len(statements) != 1:
+        die("production query must contain exactly one statement")
+    return statements[0]
+
+
+def has_cross_database_identifier(tokens: list[SqlToken]) -> bool:
+    for position, token in enumerate(tokens):
+        if not token.is_identifier:
+            continue
+        dot_count = 0
+        cursor = position + 1
+        last_was_identifier = True
+        while cursor < len(tokens):
+            current = tokens[cursor]
+            if current.kind == "symbol" and current.value == ".":
+                dot_count += 1
+                last_was_identifier = False
+                cursor += 1
+                continue
+            if current.is_identifier and not last_was_identifier:
+                last_was_identifier = True
+                cursor += 1
+                continue
+            break
+        if dot_count >= 2 and last_was_identifier:
+            return True
+    return False
+
+
+def validate_read_query_text(
+    text: str,
+    *,
+    production: bool = False,
+    engine: Optional[str] = None,
+) -> None:
     forbidden = {
         "ALTER",
         "BACKUP",
@@ -683,44 +998,47 @@ def validate_read_query(sql_file: Path, *, production: bool = False) -> None:
         "USE",
         "WRITETEXT",
     }
-    tokens = executable_sql_tokens(sql_file)
-    if not tokens or tokens[0] not in {"SELECT", "WITH"}:
+    lexical_tokens = lex_sql(text)
+    word_tokens = [
+        token.value
+        for token in lexical_tokens
+        if token.kind == "word"
+    ]
+    first_token = next(
+        (token for token in lexical_tokens if token.kind != "symbol"),
+        None,
+    )
+    if (
+        first_token is None
+        or first_token.kind != "word"
+        or first_token.value not in {"SELECT", "WITH"}
+    ):
         die("query SQL must begin with SELECT or WITH; use exec with review for other batches")
-    blocked = forbidden.intersection(tokens)
+    blocked = forbidden.intersection(word_tokens)
     if blocked:
         die("query SQL contains a write, execution, or database-switching keyword; use exec with review")
     if production:
-        production_forbidden = {
+        if engine not in SUPPORTED_ENGINES:
+            die("production query validation requires a supported database engine")
+        single_statement_sql_text(text)
+        if any(
+            token.kind in {"unicode-quoted-identifier", "dollar-string"}
+            for token in lexical_tokens
+        ):
+            die("production query contains an unsupported quoted form")
+        production_forbidden_keywords = {
             "BEGIN",
             "CALL",
             "COMMIT",
             "COPY",
             "DECLARE",
-            "DBLINK_EXEC",
             "DO",
             "GO",
             "HOLDLOCK",
             "LISTEN",
             "LOAD",
-            "LO_EXPORT",
             "NEXT",
-            "NEXTVAL",
             "NOTIFY",
-            "OPENDATASOURCE",
-            "OPENQUERY",
-            "OPENROWSET",
-            "PG_CANCEL_BACKEND",
-            "PG_CREATE_RESTORE_POINT",
-            "PG_LOGICAL_EMIT_MESSAGE",
-            "PG_LS_DIR",
-            "PG_READ_BINARY_FILE",
-            "PG_READ_FILE",
-            "PG_RELOAD_CONF",
-            "PG_ROTATE_LOGFILE",
-            "PG_STAT_FILE",
-            "PG_SWITCH_WAL",
-            "PG_TERMINATE_BACKEND",
-            "PG_WRITE_FILE",
             "PREPARE",
             "RAISERROR",
             "RECEIVE",
@@ -728,8 +1046,6 @@ def validate_read_query(sql_file: Path, *, production: bool = False) -> None:
             "ROLLBACK",
             "SAVEPOINT",
             "SET",
-            "SETVAL",
-            "SP_EXECUTESQL",
             "TABLOCKX",
             "THROW",
             "UNLISTEN",
@@ -737,10 +1053,72 @@ def validate_read_query(sql_file: Path, *, production: bool = False) -> None:
             "VACUUM",
             "WAITFOR",
             "XLOCK",
+        }
+        if production_forbidden_keywords.intersection(word_tokens):
+            die("query SQL contains an unsafe production-read keyword")
+        production_forbidden_identifiers = {
+            "DBLINK",
+            "DBLINK_CONNECT",
+            "DBLINK_CONNECT_U",
+            "DBLINK_EXEC",
+            "LO_EXPORT",
+            "LO_IMPORT",
+            "NEXTVAL",
+            "OPENDATASOURCE",
+            "OPENQUERY",
+            "OPENROWSET",
+            "PG_ADVISORY_LOCK",
+            "PG_ADVISORY_LOCK_SHARED",
+            "PG_ADVISORY_XACT_LOCK",
+            "PG_ADVISORY_XACT_LOCK_SHARED",
+            "PG_BACKUP_START",
+            "PG_BACKUP_STOP",
+            "PG_CANCEL_BACKEND",
+            "PG_CREATE_RESTORE_POINT",
+            "PG_LOG_BACKEND_MEMORY_CONTEXTS",
+            "PG_LOGICAL_EMIT_MESSAGE",
+            "PG_LS_DIR",
+            "PG_PROMOTE",
+            "PG_READ_BINARY_FILE",
+            "PG_READ_FILE",
+            "PG_RELOAD_CONF",
+            "PG_ROTATE_LOGFILE",
+            "PG_STAT_FILE",
+            "PG_SWITCH_WAL",
+            "PG_TERMINATE_BACKEND",
+            "PG_TRY_ADVISORY_LOCK",
+            "PG_TRY_ADVISORY_LOCK_SHARED",
+            "PG_TRY_ADVISORY_XACT_LOCK",
+            "PG_TRY_ADVISORY_XACT_LOCK_SHARED",
+            "PG_WAL_REPLAY_PAUSE",
+            "PG_WAL_REPLAY_RESUME",
+            "PG_WRITE_FILE",
+            "SETVAL",
+            "SP_EXECUTESQL",
             "XP_CMDSHELL",
         }
-        if production_forbidden.intersection(tokens):
-            die("query SQL contains an unsafe production-read keyword")
+        identifier_values = {
+            token.value
+            for token in lexical_tokens
+            if token.is_identifier
+        }
+        if production_forbidden_identifiers.intersection(identifier_values):
+            die("query SQL contains an unsafe production-read identifier")
+        if engine == "sqlserver" and has_cross_database_identifier(lexical_tokens):
+            die("production SQL Server query contains a cross-database or cross-server name")
+
+
+def validate_read_query(
+    sql_file: Path,
+    *,
+    production: bool = False,
+    engine: Optional[str] = None,
+) -> None:
+    validate_read_query_text(
+        read_sql_text(sql_file),
+        production=production,
+        engine=engine or ("sqlserver" if production else None),
+    )
 
 
 def classify_ping_error(output: str) -> str:
@@ -819,44 +1197,40 @@ def classify_ping_error(output: str) -> str:
     return "UNKNOWN"
 
 
-def single_statement_sql(sql_file: Path) -> str:
-    sql_text = read_sql_text(sql_file)
-    visible = visible_sql_text(sql_text)
-    semicolons = [position for position, character in enumerate(visible) if character == ";"]
-    if len(semicolons) > 1:
-        die("production PostgreSQL query must contain exactly one statement")
-    if semicolons:
-        position = semicolons[0]
-        if visible[position + 1 :].strip():
-            die("production PostgreSQL query must contain exactly one statement")
-        sql_text = sql_text[:position] + sql_text[position + 1 :]
-    sql_text = sql_text.strip()
-    if not sql_text:
-        die("production PostgreSQL query is empty")
-    return sql_text
-
-
-def create_production_query_file(sql_file: Path, engine: str) -> Path:
-    sql_text = read_sql_text(sql_file)
+def create_runtime_sql_file(
+    snapshot: SqlSnapshot,
+    *,
+    engine: str,
+    production_read: bool,
+) -> Path:
+    if engine not in SUPPORTED_ENGINES:
+        die("database engine is not supported")
+    prefix = ".dbctl-production-read-" if production_read else ".dbctl-runtime-"
     fd, temporary_name = tempfile.mkstemp(
-        prefix=".dbctl-production-read-",
+        prefix=prefix,
         suffix=".sql",
-        dir=sql_file.parent,
+        dir=snapshot.path.parent,
     )
     temporary = Path(temporary_name)
     try:
         if os.name != "nt":
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            if engine == "sqlserver":
+            if not production_read:
+                handle.write(snapshot.text)
+                if not snapshot.text.endswith("\n"):
+                    handle.write("\n")
+            elif engine == "sqlserver":
+                query = single_statement_sql_text(snapshot.text)
                 handle.write(f"SET LOCK_TIMEOUT {PRODUCTION_LOCK_TIMEOUT_MS};\n")
                 handle.write("SET DEADLOCK_PRIORITY LOW;\n")
+                handle.write("SET NOCOUNT ON;\n")
                 handle.write(f"SET ROWCOUNT {PRODUCTION_MAX_ROWS};\n")
-                handle.write(sql_text)
-                if not sql_text.endswith("\n"):
+                handle.write(query)
+                if not query.endswith("\n"):
                     handle.write("\n")
             elif engine == "postgresql":
-                query = single_statement_sql(sql_file)
+                query = single_statement_sql_text(snapshot.text)
                 handle.write("BEGIN TRANSACTION READ ONLY;\n")
                 handle.write(
                     f"SET LOCAL statement_timeout = '{PRODUCTION_QUERY_TIMEOUT_SECONDS}s';\n"
@@ -867,8 +1241,6 @@ def create_production_query_file(sql_file: Path, engine: str) -> Path:
                 handle.write(f"\n) AS dbctl_bounded_query\nLIMIT {PRODUCTION_MAX_ROWS}\n")
                 handle.write(") TO STDOUT WITH (FORMAT CSV, HEADER TRUE);\n")
                 handle.write("ROLLBACK;\n")
-            else:
-                die("database engine is not supported")
         return temporary
     except Exception:
         try:
@@ -1034,6 +1406,96 @@ def bound_postgresql_csv_output(output: str) -> str:
     return rendered.getvalue()
 
 
+def run_bounded_production_client(
+    argv: list[str],
+    env: dict[str, str],
+    *,
+    operation_name: str = "query",
+) -> tuple[int, str]:
+    try:
+        process = subprocess.Popen(
+            argv,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError:
+        die(
+            f"production {operation_name} client could not be started; "
+            "details were suppressed"
+        )
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        die(f"production {operation_name} output could not be captured")
+
+    captured = bytearray()
+    output_limit_exceeded = threading.Event()
+    reader_failures: list[BaseException] = []
+
+    def read_output() -> None:
+        try:
+            while True:
+                chunk = process.stdout.read(8192)
+                if not chunk:
+                    break
+                remaining = PRODUCTION_MAX_OUTPUT_BYTES + 1 - len(captured)
+                if remaining > 0:
+                    captured.extend(chunk[:remaining])
+                if (
+                    len(captured) > PRODUCTION_MAX_OUTPUT_BYTES
+                    and not output_limit_exceeded.is_set()
+                ):
+                    output_limit_exceeded.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+        except BaseException as error:
+            reader_failures.append(error)
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    reader = threading.Thread(target=read_output, name="dbctl-output-reader", daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=PRODUCTION_QUERY_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        returncode = process.wait()
+    finally:
+        reader.join(timeout=5)
+        if reader.is_alive():
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait()
+            reader.join(timeout=1)
+        process.stdout.close()
+
+    if reader.is_alive() or reader_failures:
+        die(f"production {operation_name} output could not be captured safely")
+    if timed_out:
+        captured.clear()
+        die(
+            f"production {operation_name} timed out; "
+            "output and connection details were suppressed"
+        )
+    if output_limit_exceeded.is_set():
+        captured.clear()
+        die(
+            f"production {operation_name} exceeded the output limit; "
+            "results were suppressed"
+        )
+    return returncode, captured.decode("utf-8", errors="replace")
+
+
 def run_database_command(argv: list[str]) -> int:
     if len(argv) < 3:
         die("database command requires a project and target")
@@ -1085,15 +1547,24 @@ def run_database_command(argv: list[str]) -> int:
     else:
         die("unknown database command")
 
-    sql_file = None
+    production_target = environment == "production"
+    sql_snapshot: Optional[SqlSnapshot] = None
     if sql_file_value is not None:
-        sql_file = validate_sql_file(sql_file_value, context["query_root"])
+        sql_snapshot = load_sql_snapshot(
+            sql_file_value,
+            context["query_root"],
+            production=production_target,
+        )
         if command_name == "query":
-            validate_read_query(sql_file, production=environment == "production")
+            validate_read_query_text(
+                sql_snapshot.text,
+                production=production_target,
+                engine=context["engine"],
+            )
     profile = load_profile(context)
-    client = find_database_client(profile["engine"])
+    client = find_database_client(profile["engine"], production=production_target)
     password = resolve_password(profile)
-    production_read = environment == "production" and command_name == "query"
+    production_read = production_target and command_name == "query"
     print(
         f"Project: {project}\nTarget: {target}\nEnvironment: {environment}\n"
         f"Access: {access}\nOperation: {command_name}"
@@ -1102,8 +1573,13 @@ def run_database_command(argv: list[str]) -> int:
     password = ""
     runtime_sql_file: Optional[Path] = None
     try:
+        if sql_snapshot is not None:
+            runtime_sql_file = create_runtime_sql_file(
+                sql_snapshot,
+                engine=profile["engine"],
+                production_read=production_read,
+            )
         if production_read:
-            runtime_sql_file = create_production_query_file(sql_file, profile["engine"])
             print(
                 "ProductionReadControls: ENFORCED\n"
                 f"RowLimit: {PRODUCTION_MAX_ROWS}\n"
@@ -1113,31 +1589,47 @@ def run_database_command(argv: list[str]) -> int:
             client,
             profile,
             command_name,
-            runtime_sql_file or sql_file,
+            runtime_sql_file,
             production_read=production_read,
         )
         if command_name == "ping":
-            result = subprocess.run(
-                args,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                check=False,
-            )
+            if production_target:
+                returncode, output = run_bounded_production_client(
+                    args,
+                    env,
+                    operation_name="ping",
+                )
+            else:
+                result = subprocess.run(
+                    args,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                )
+                returncode = result.returncode
+                output = result.stdout
             clear_client_password(env)
-            if result.returncode == 0:
+            if returncode == 0:
+                output = ""
+                if not production_target:
+                    result.stdout = ""
                 print("Connection: OK")
                 return 0
-            category = classify_ping_error(result.stdout)
-            result.stdout = ""
+            category = classify_ping_error(output)
+            output = ""
+            if not production_target:
+                result.stdout = ""
             die(
                 f"{profile['engine']} client ping failed; category={category}; "
                 "connection details were suppressed"
             )
-        try:
+        if production_read:
+            returncode, output = run_bounded_production_client(args, env)
+        else:
             result = subprocess.run(
                 args,
                 env=env,
@@ -1146,27 +1638,22 @@ def run_database_command(argv: list[str]) -> int:
                 stderr=subprocess.STDOUT,
                 text=True,
                 errors="replace",
-                timeout=PRODUCTION_QUERY_TIMEOUT_SECONDS if production_read else None,
                 check=False,
             )
-        except subprocess.TimeoutExpired as error:
-            error.output = None
-            die("production query timed out; output and connection details were suppressed")
+            returncode = result.returncode
+            output = result.stdout
         clear_client_password(env)
-        if result.returncode != 0:
-            result.stdout = ""
+        if returncode != 0:
+            output = ""
+            if not production_read:
+                result.stdout = ""
             die(f"{profile['engine']} client execution failed; connection details were suppressed")
-        output = result.stdout
         if production_read and profile["engine"] == "postgresql":
             output = bound_postgresql_csv_output(output)
-            result.stdout = ""
-        if production_read and len(output.encode("utf-8")) > PRODUCTION_MAX_OUTPUT_BYTES:
-            result.stdout = ""
-            output = ""
-            die("production query exceeded the output limit; results were suppressed")
         sys.stdout.write(output)
         output = ""
-        result.stdout = ""
+        if not production_read:
+            result.stdout = ""
         return 0
     finally:
         clear_client_password(env)
@@ -1299,6 +1786,11 @@ def profile_command(argv: list[str]) -> int:
         }
 
     environment = prompt_choice("Environment", {"testing", "production"})
+    if environment == "production" and "--credential-mode" not in seen_options:
+        die(
+            "production profile initialization requires explicit "
+            "--credential-mode system|inline"
+        )
     access = prompt_choice("Access", {"read-only", "read-write"})
     engine_label = "SQL Server" if engine == "sqlserver" else "PostgreSQL"
     host = prompt_text(f"{engine_label} host")

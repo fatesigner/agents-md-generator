@@ -35,7 +35,7 @@ Keep project identifiers, target names, environment values, access metadata, rel
 
 ## Inline credential profile
 
-New profiles default to schema version 1 and store one inline password in the protected local profile. This mode is supported for testing and production targets. A production profile may declare `access: read-only` or `access: read-write`, but `dbctl` production operations remain read-only and retain all production gates.
+New testing profiles default to schema version 1 and store one inline password in the protected local profile. Inline mode remains supported for production targets only when the initializer explicitly receives `--credential-mode inline`; production initialization must explicitly choose inline or system mode instead of silently defaulting. A production profile may declare `access: read-only` or `access: read-write`, but `dbctl` production operations remain read-only and retain all production gates.
 
 ```json
 {
@@ -87,7 +87,7 @@ Pass `--credential-mode system` during initialization to create schema version 2
 
 This is a field-shape example only. Never replace the placeholders inside Skill or repository files.
 
-For a new machine, run `dbctl profile init <project> <target> [--engine sqlserver|postgresql]` in a local interactive terminal after `bootstrap` for the default inline mode. The engine defaults to `sqlserver`; pass `--engine postgresql` for PostgreSQL. The initializer prompts for connection metadata and the password, creates a schema-version-1 profile, and adds the target to the index. For system mode, add `--credential-mode system`, then use a separate `credential set` command. For the first target in a project, the query root must already exist and be supplied as an absolute local path.
+For a new machine, run `dbctl profile init <project> <target> [--engine sqlserver|postgresql]` in a local interactive terminal after `bootstrap`. The engine defaults to `sqlserver`; pass `--engine postgresql` for PostgreSQL. Testing targets default to inline mode. Production targets must add either `--credential-mode system` or `--credential-mode inline`; prefer system mode on supported platforms. Inline initialization prompts for connection metadata and the password, creates a schema-version-1 profile, and adds the target to the index. System mode creates schema-version-2 metadata, then uses a separate `credential set` command. For the first target in a project, the query root must already exist and be supplied as an absolute local path.
 
 - Keep the database username in the protected local profile; in system mode, keep the password only in the platform credential store.
 - Require `secretProvider` to equal `system`.

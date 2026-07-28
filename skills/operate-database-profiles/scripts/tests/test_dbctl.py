@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -227,6 +228,51 @@ class DbctlTestCase(unittest.TestCase):
         self.assertIn("ON_ERROR_STOP=1", args)
         self.assertNotIn("--password", args)
 
+    def test_production_rejects_database_client_environment_overrides(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DBCTL_SQLCMD": str(self.root / "untrusted-sqlcmd"),
+                "DBCTL_PSQL": str(self.root / "untrusted-psql"),
+            },
+        ):
+            with self.assertRaisesRegex(dbctl.DbctlError, "override is not allowed"):
+                dbctl.find_sqlcmd(production=True)
+            with self.assertRaisesRegex(dbctl.DbctlError, "override is not allowed"):
+                dbctl.find_psql(production=True)
+
+    @unittest.skipIf(os.name == "nt", "POSIX path trust policy")
+    def test_production_rejects_database_client_outside_system_roots(self) -> None:
+        client = self.root / "untrusted-sqlcmd"
+        client.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        client.chmod(0o755)
+
+        with self.assertRaisesRegex(dbctl.DbctlError, "under /usr or /opt"):
+            dbctl.validate_production_client_path(client)
+
+    def test_windows_production_client_requires_program_files_root(self) -> None:
+        trusted_root = self.root / "Program Files"
+        trusted_root.mkdir()
+        trusted_client = trusted_root / "sqlcmd.exe"
+        trusted_client.write_text("synthetic client", encoding="utf-8")
+        trusted_client.chmod(0o755)
+        untrusted_client = self.root / "Downloads" / "sqlcmd.exe"
+        untrusted_client.parent.mkdir()
+        untrusted_client.write_text("synthetic client", encoding="utf-8")
+        untrusted_client.chmod(0o755)
+
+        with mock.patch.object(dbctl.os, "name", "nt"), mock.patch.object(
+            dbctl,
+            "trusted_windows_program_roots",
+            return_value=[trusted_root.resolve()],
+        ):
+            self.assertEqual(
+                dbctl.validate_production_client_path(trusted_client),
+                trusted_client.resolve(),
+            )
+            with self.assertRaisesRegex(dbctl.DbctlError, "under Program Files"):
+                dbctl.validate_production_client_path(untrusted_client)
+
     def test_sql_file_must_stay_in_query_root_and_reject_meta_commands(self) -> None:
         valid = self.query_root / "valid.sql"
         valid.write_text("SELECT 1;\n", encoding="utf-8")
@@ -262,6 +308,19 @@ class DbctlTestCase(unittest.TestCase):
         with self.assertRaisesRegex(dbctl.DbctlError, "configured query root"):
             dbctl.validate_sql_file(str(outside), self.query_root)
 
+    @unittest.skipIf(os.name == "nt", "POSIX SQL file mode policy")
+    def test_production_rejects_group_or_world_writable_sql_file(self) -> None:
+        sql_file = self.query_root / "writable-production.sql"
+        sql_file.write_text("SELECT 1;\n", encoding="utf-8")
+        sql_file.chmod(0o666)
+
+        with self.assertRaisesRegex(dbctl.DbctlError, "group- or world-writable"):
+            dbctl.load_sql_snapshot(
+                str(sql_file),
+                self.query_root,
+                production=True,
+            )
+
     def test_query_rejects_write_keywords_outside_literals_and_comments(self) -> None:
         read_query = self.query_root / "read-query.sql"
         read_query.write_text(
@@ -294,6 +353,126 @@ class DbctlTestCase(unittest.TestCase):
         )
         with self.assertRaisesRegex(dbctl.DbctlError, "unsafe production-read keyword"):
             dbctl.validate_read_query(production_lock, production=True)
+
+    def test_production_rejects_quoted_dangerous_identifiers_and_cross_database_names(
+        self,
+    ) -> None:
+        safe_quoted_column = self.query_root / "safe-quoted-column.sql"
+        safe_quoted_column.write_text(
+            'SELECT "update" FROM sample;\n',
+            encoding="utf-8",
+        )
+        dbctl.validate_read_query(
+            safe_quoted_column,
+            production=True,
+            engine="postgresql",
+        )
+
+        unsafe_cases = [
+            (
+                "quoted-terminate.sql",
+                'SELECT pg_catalog."pg_terminate_backend"(1);\n',
+                "postgresql",
+                "unsafe production-read identifier",
+            ),
+            (
+                "quoted-dblink.sql",
+                'SELECT public."dblink_exec"(\'connection\', \'SELECT 1\');\n',
+                "postgresql",
+                "unsafe production-read identifier",
+            ),
+            (
+                "cross-database.sql",
+                "SELECT TOP (1) id FROM OtherDatabase.dbo.Sample;\n",
+                "sqlserver",
+                "cross-database or cross-server",
+            ),
+            (
+                "cross-database-default-schema.sql",
+                "SELECT TOP (1) id FROM OtherDatabase..Sample;\n",
+                "sqlserver",
+                "cross-database or cross-server",
+            ),
+            (
+                "linked-server.sql",
+                "SELECT TOP (1) id FROM LinkedServer.OtherDatabase.dbo.Sample;\n",
+                "sqlserver",
+                "cross-database or cross-server",
+            ),
+        ]
+        for filename, sql, engine, message in unsafe_cases:
+            with self.subTest(filename=filename):
+                path = self.query_root / filename
+                path.write_text(sql, encoding="utf-8")
+                with self.assertRaisesRegex(dbctl.DbctlError, message):
+                    dbctl.validate_read_query(path, production=True, engine=engine)
+
+    def test_production_requires_exactly_one_statement_for_every_engine(self) -> None:
+        multiple = self.query_root / "multiple-statements.sql"
+        multiple.write_text("SELECT 1; SELECT 2;\n", encoding="utf-8")
+        for engine in ("sqlserver", "postgresql"):
+            with self.subTest(engine=engine):
+                with self.assertRaisesRegex(dbctl.DbctlError, "exactly one statement"):
+                    dbctl.validate_read_query(multiple, production=True, engine=engine)
+
+        sqlserver_cte = self.query_root / "sqlserver-cte.sql"
+        sqlserver_cte.write_text(
+            ";WITH values_cte AS (SELECT 1 AS value) SELECT value FROM values_cte;\n",
+            encoding="utf-8",
+        )
+        dbctl.validate_read_query(sqlserver_cte, production=True, engine="sqlserver")
+
+    def test_runtime_sql_uses_the_validated_snapshot_after_source_changes(self) -> None:
+        source = self.query_root / "snapshot.sql"
+        source.write_text("SELECT 1 AS reviewed_value;\n", encoding="utf-8")
+        snapshot = dbctl.load_sql_snapshot(str(source), self.query_root)
+        dbctl.validate_read_query_text(
+            snapshot.text,
+            production=True,
+            engine="sqlserver",
+        )
+
+        source.write_text("SELECT 2 AS changed_value;\n", encoding="utf-8")
+        runtime = dbctl.create_runtime_sql_file(
+            snapshot,
+            engine="sqlserver",
+            production_read=True,
+        )
+        try:
+            runtime_text = runtime.read_text(encoding="utf-8")
+        finally:
+            runtime.unlink(missing_ok=True)
+
+        self.assertIn("SELECT 1 AS reviewed_value", runtime_text)
+        self.assertNotIn("SELECT 2 AS changed_value", runtime_text)
+
+    def test_bounded_production_client_stops_at_output_and_timeout_limits(self) -> None:
+        with self.assertRaisesRegex(dbctl.DbctlError, "output limit"):
+            dbctl.run_bounded_production_client(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys; "
+                        f"sys.stdout.write('X' * ({dbctl.PRODUCTION_MAX_OUTPUT_BYTES} + 8192))"
+                    ),
+                ],
+                os.environ.copy(),
+            )
+
+        with mock.patch.object(dbctl, "PRODUCTION_QUERY_TIMEOUT_SECONDS", 0.05):
+            with self.assertRaisesRegex(dbctl.DbctlError, "timed out"):
+                dbctl.run_bounded_production_client(
+                    [sys.executable, "-c", "import time; time.sleep(1)"],
+                    os.environ.copy(),
+                )
+
+        returncode, output = dbctl.run_bounded_production_client(
+            [sys.executable, "-c", "print('bounded-ok')"],
+            os.environ.copy(),
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(output, "bounded-ok\n")
 
     def test_project_access_requires_private_profile_root(self) -> None:
         self.profile_root.chmod(0o755)
@@ -474,7 +653,15 @@ class DbctlTestCase(unittest.TestCase):
         ), mock.patch.object(
             dbctl.getpass, "getpass", side_effect=["SYNTHETIC_SECRET", "SYNTHETIC_SECRET"]
         ):
-            result = dbctl.profile_command(["init", "sample-project", "backend-prod-new"])
+            result = dbctl.profile_command(
+                [
+                    "init",
+                    "sample-project",
+                    "backend-prod-new",
+                    "--credential-mode",
+                    "inline",
+                ]
+            )
         self.assertEqual(result, 0)
         created = json.loads(
             (self.profiles_dir / "backend-prod-new.json").read_text(encoding="utf-8")
@@ -509,6 +696,8 @@ class DbctlTestCase(unittest.TestCase):
                     "backend-postgres",
                     "--engine",
                     "postgresql",
+                    "--credential-mode",
+                    "inline",
                 ]
             )
         self.assertEqual(result, 0)
@@ -522,6 +711,16 @@ class DbctlTestCase(unittest.TestCase):
         updated_index = json.loads(self.index_file.read_text(encoding="utf-8"))
         self.assertEqual(updated_index["targets"]["backend-postgres"]["engine"], "postgresql")
         self.assertEqual(updated_index["targets"]["backend-postgres"]["access"], "read-write")
+
+    def test_profile_init_requires_explicit_credential_mode_for_production(self) -> None:
+        with mock.patch.object(dbctl.sys.stdin, "isatty", return_value=True), mock.patch(
+            "builtins.input",
+            side_effect=["production"],
+        ), mock.patch.object(dbctl.getpass, "getpass") as getpass_prompt:
+            with self.assertRaisesRegex(dbctl.DbctlError, "explicit --credential-mode"):
+                dbctl.profile_command(["init", "sample-project", "backend-prod-implicit"])
+        getpass_prompt.assert_not_called()
+        self.assertFalse((self.profiles_dir / "backend-prod-implicit.json").exists())
 
     def test_profile_init_allows_explicit_system_mode(self) -> None:
         answers = [
@@ -608,18 +807,20 @@ class DbctlTestCase(unittest.TestCase):
         calls = []
         runtime_sql = None
 
-        def fake_run(args, **kwargs):
+        def fake_bounded_run(args, env):
             nonlocal runtime_sql
-            calls.append((args, kwargs))
+            calls.append((args, {"env": dict(env)}))
             runtime_path = Path(args[args.index("-i") + 1])
             runtime_sql = runtime_path.read_text(encoding="utf-8")
-            return SimpleNamespace(returncode=0, stdout="answer\n------\n1\n")
+            return 0, "answer\n------\n1\n"
 
         with mock.patch.object(
             dbctl, "find_sqlcmd", return_value=Path("/approved/sqlcmd")
-        ), mock.patch.object(dbctl.subprocess, "run", side_effect=fake_run), mock.patch(
-            "sys.stdout"
-        ) as stdout:
+        ), mock.patch.object(
+            dbctl,
+            "run_bounded_production_client",
+            side_effect=fake_bounded_run,
+        ), mock.patch("sys.stdout") as stdout:
             result = dbctl.run_database_command(
                 [
                     "query",
@@ -650,19 +851,55 @@ class DbctlTestCase(unittest.TestCase):
             [],
         )
 
+    def test_production_ping_uses_bounded_client_runner(self) -> None:
+        self.configure_production_target()
+        calls = []
+
+        def fake_bounded_run(args, env, *, operation_name):
+            calls.append((args, dict(env), operation_name))
+            return 0, "ConnectionOk\n1\n"
+
+        with mock.patch.object(
+            dbctl, "find_sqlcmd", return_value=Path("/approved/sqlcmd")
+        ), mock.patch.object(
+            dbctl,
+            "run_bounded_production_client",
+            side_effect=fake_bounded_run,
+        ), mock.patch("sys.stdout") as stdout:
+            result = dbctl.run_database_command(
+                [
+                    "ping",
+                    "sample-project",
+                    "backend-test",
+                    "--allow-production",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], "ping")
+        self.assertEqual(calls[0][1]["SQLCMDPASSWORD"], "SYNTHETIC_SECRET")
+        rendered = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        self.assertIn("Connection: OK", rendered)
+        self.assertNotIn("ConnectionOk", rendered)
+
     def test_production_query_does_not_probe_account_permissions(self) -> None:
         self.configure_production_target()
         sql_file = self.query_root / "production-no-permission-probe.sql"
         sql_file.write_text("SELECT 1;\n", encoding="utf-8")
         calls = []
 
-        def fake_run(args, **kwargs):
+        def fake_bounded_run(args, env):
             calls.append(args)
-            return SimpleNamespace(returncode=0, stdout="1\n")
+            return 0, "1\n"
 
         with mock.patch.object(
             dbctl, "find_sqlcmd", return_value=Path("/approved/sqlcmd")
-        ), mock.patch.object(dbctl.subprocess, "run", side_effect=fake_run):
+        ), mock.patch.object(
+            dbctl,
+            "run_bounded_production_client",
+            side_effect=fake_bounded_run,
+        ):
             result = dbctl.run_database_command(
                 [
                     "query",
@@ -682,16 +919,15 @@ class DbctlTestCase(unittest.TestCase):
         self.configure_production_target()
         sql_file = self.query_root / "production-large.sql"
         sql_file.write_text("SELECT 1;\n", encoding="utf-8")
-        result = SimpleNamespace(
-            returncode=0,
-            stdout="X" * (dbctl.PRODUCTION_MAX_OUTPUT_BYTES + 1),
-        )
-
         with mock.patch.object(
             dbctl, "find_sqlcmd", return_value=Path("/approved/sqlcmd")
-        ), mock.patch.object(dbctl.subprocess, "run", return_value=result), mock.patch(
-            "sys.stdout"
-        ) as stdout:
+        ), mock.patch.object(
+            dbctl,
+            "run_bounded_production_client",
+            side_effect=dbctl.DbctlError(
+                "production query exceeded the output limit; results were suppressed"
+            ),
+        ), mock.patch("sys.stdout") as stdout:
             with self.assertRaisesRegex(dbctl.DbctlError, "output limit"):
                 dbctl.run_database_command(
                     [
@@ -727,21 +963,20 @@ class DbctlTestCase(unittest.TestCase):
         calls = []
         runtime_sql = None
 
-        def fake_run(args, **kwargs):
+        def fake_bounded_run(args, env):
             nonlocal runtime_sql
-            calls.append((args, {**kwargs, "env": dict(kwargs["env"])}))
+            calls.append((args, {"env": dict(env)}))
             runtime_path = Path(args[args.index("-f") + 1])
             runtime_sql = runtime_path.read_text(encoding="utf-8")
-            return SimpleNamespace(
-                returncode=0,
-                stdout="answer,details\n1," + ("X" * 300) + "\n",
-            )
+            return 0, "answer,details\n1," + ("X" * 300) + "\n"
 
         with mock.patch.object(
             dbctl, "find_database_client", return_value=Path("/approved/psql")
-        ), mock.patch.object(dbctl.subprocess, "run", side_effect=fake_run), mock.patch(
-            "sys.stdout"
-        ) as stdout:
+        ), mock.patch.object(
+            dbctl,
+            "run_bounded_production_client",
+            side_effect=fake_bounded_run,
+        ), mock.patch("sys.stdout") as stdout:
             result = dbctl.run_database_command(
                 [
                     "query",

@@ -6,20 +6,21 @@ Support inline and system-backed credentials across the installation, but requir
 
 | Profile mode | Schema | Secret fields | Intended use |
 | --- | --- | --- | --- |
-| Inline | 1 | Non-empty `password` only | Default for new testing and production profiles |
-| System-backed | 2 | `secretProvider: system` and deterministic `secretRef` | Explicitly selected profiles and migrated profiles |
+| Inline | 1 | Non-empty `password` only | Default for new testing profiles; explicit choice for new production profiles |
+| System-backed | 2 | `secretProvider: system` and deterministic `secretRef` | Explicitly selected profiles and migrated profiles; preferred for production |
 
 Different targets may use different modes while migration is in progress. A single target must not contain both modes.
 
 ## Invariants
 
-- Create new profiles as schema version 1 inline by default; create schema version 2 only when `--credential-mode system` is explicitly selected.
+- Create new testing profiles as schema version 1 inline by default; create schema version 2 only when `--credential-mode system` is explicitly selected.
+- Require an explicit `--credential-mode inline|system` when creating a production profile. Prefer `system` where the platform provider is available.
 - Do not add, preserve, or copy a `password` field into a schema-version-2 profile, including empty or null values.
 - Do not add `secretProvider` or `secretRef` to a schema-version-1 profile.
 - Derive `secretRef` exactly as `<project>/<target>`; do not accept an arbitrary credential identifier.
 - Treat a mixed profile as invalid instead of choosing one credential source.
 - Treat a missing, locked, unavailable, or corrupt system credential as an explicit failure. Do not consult an inline password, environment variable, connection string, DBeaver store, or another profile.
-- Inline production profiles are supported with `access: read-only` or `access: read-write` metadata. This metadata does not enable production writes; all production operation and confirmation gates remain unchanged, and production `exec` is always rejected.
+- Inline production profiles remain supported only when `--credential-mode inline` is explicitly selected, with `access: read-only` or `access: read-write` metadata. This metadata does not enable production writes; all production operation and confirmation gates remain unchanged, and production `exec` is always rejected.
 
 ## Resolution algorithm
 
@@ -76,7 +77,7 @@ If system credential setup or verification fails, do not rewrite the profile. If
 
 ## New-machine workflow
 
-The default new-machine path creates an inline profile and prompts twice for the password without placing it in argv or output:
+The default testing new-machine path creates an inline profile and prompts twice for the password without placing it in argv or output:
 
 ```text
 dbctl bootstrap
@@ -95,7 +96,13 @@ dbctl credential status <project> <target>
 dbctl doctor <project> <target>
 ```
 
-Use `profile init` only for a target that does not already exist. If the selected platform has no supported system provider, explicit system initialization fails before the profile or index target is written; it never falls back to inline. System credentials do not travel with the Skill or profile metadata. For an existing schema-version-2 profile copied through an approved metadata workflow, skip initialization and run `credential set` locally. The same `secretRef` does not synchronize a secret across machines, OS users, or unavailable sessions; absolute query roots, index mappings, and file permissions also remain machine-local. Never copy an inline profile as a password-distribution mechanism.
+For a new production profile, select the credential source explicitly:
+
+```text
+dbctl profile init <project> <target> --credential-mode system
+```
+
+Select `production` and the intended access metadata at the interactive prompts. Use `--credential-mode inline` instead only when that storage choice is intentional. Use `profile init` only for a target that does not already exist. If the selected platform has no supported system provider, explicit system initialization fails before the profile or index target is written; it never falls back to inline. System credentials do not travel with the Skill or profile metadata. For an existing schema-version-2 profile copied through an approved metadata workflow, skip initialization and run `credential set` locally. The same `secretRef` does not synchronize a secret across machines, OS users, or unavailable sessions; absolute query roots, index mappings, and file permissions also remain machine-local. Never copy an inline profile as a password-distribution mechanism.
 
 ## Rotation and recovery
 

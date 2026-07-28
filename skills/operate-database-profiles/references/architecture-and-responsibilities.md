@@ -63,14 +63,15 @@ Each layer has a separate job. `AGENTS.md` defines authority and scope; the Skil
 
 ```text
 User terminal -> bootstrap -> protected root and ACL checks
-  -> profile init -> schema-v1 inline profile by default
+  -> testing profile init -> schema-v1 inline profile by default
+     or production profile init -> explicit inline or system choice
      or explicit --credential-mode system -> schema-v2 metadata with secretRef
   -> hidden password confirmation during inline init
      or interactive credential set for the system store
   -> credential status and doctor
 ```
 
-`bootstrap` creates and protects the platform-local root; it does not install `sqlcmd` or `psql`, create a profile, or provision a credential. The user supplies protected connection metadata during local `profile init`; SQL Server is the default engine and PostgreSQL is selected with `--engine postgresql`. Inline mode is the default and prompts twice for the password. Production access metadata may be read-only or read-write, while production operations remain read-only and retain all operation gates. The explicit system path creates only metadata and then accepts the secret during interactive `credential set`. The agent may guide the workflow and run safe validation commands, but it must not supply, capture, or repeat those values. A new machine receives scripts and non-secret structure through the approved asset flow; secrets are provisioned locally and inline profiles must never be synchronized as password-distribution files.
+`bootstrap` creates and protects the platform-local root; it does not install `sqlcmd` or `psql`, create a profile, or provision a credential. The user supplies protected connection metadata during local `profile init`; SQL Server is the default engine and PostgreSQL is selected with `--engine postgresql`. Testing profiles default to inline mode and prompt twice for the password. Production profile creation requires an explicit inline or system choice; prefer system mode where supported. Production access metadata may be read-only or read-write, while production operations remain read-only and retain all operation gates. The explicit system path creates only metadata and then accepts the secret during interactive `credential set`. The agent may guide the workflow and run safe validation commands, but it must not supply, capture, or repeat those values. A new machine receives scripts and non-secret structure through the approved asset flow; secrets are provisioned locally and inline profiles must never be synchronized as password-distribution files.
 
 Inline mode is supported on macOS, Windows, and Linux. The current system credential providers support macOS Keychain and Windows Credential Manager only. On Linux, an explicit `--credential-mode system` request fails before any profile or index target is written; it never falls back to inline.
 
@@ -92,14 +93,15 @@ The inline value is consumed only by `dbctl`; rotation preserves schema version 
 
 ```text
 Agent writes SQL under the declared query root and reviews the whole file
-  -> dbctl validates absolute path, encoding, SQLCMD controls, and read intent
+  -> dbctl opens one immutable snapshot and validates path, size, encoding, SQLCMD controls, and read intent
   -> for production: current-task request + explicit or project-bound target + --allow-production
+     -> exactly one statement, quoted-identifier checks, and SQL Server cross-database rejection
      -> controlled temporary SQL adds lock, row, timeout, width, and output limits
-  -> credential provider -> sqlcmd or psql -> database grants
-  -> bounded result -> agent verifies shape and reports a redacted summary
+  -> credential provider -> trusted sqlcmd or psql -> database grants
+  -> streaming output cap -> agent verifies shape and reports a redacted summary
 ```
 
-The launcher's SQL checks are an intent guard, not a complete SQL parser or database authorization system. For production, `dbctl` intentionally does not inspect roles, ownership, grant options, or effective grants, and it does not claim that the account is read-only. It instead enforces the read-query validator, permanently rejects production `exec`, and applies fixed row, field-width, query-timeout, lock-wait, and total-output limits. PostgreSQL receives an additional `READ ONLY` transaction wrapper. A dedicated least-privilege account remains recommended as defense in depth. Results may still be sensitive, so the agent must request only necessary columns and report a redacted summary.
+The launcher's SQL checks are an intent guard, not a complete SQL parser or database authorization system. For production, `dbctl` intentionally does not inspect roles, ownership, grant options, or effective grants, and it does not claim that the account is read-only. It instead opens and validates one immutable SQL snapshot, requires exactly one statement, rejects dangerous identifiers even when quoted, rejects SQL Server three- and four-part cross-database or linked-server names, permanently rejects production `exec`, and applies fixed row, field-width, query-timeout, lock-wait, and streaming-output limits. PostgreSQL receives an additional `READ ONLY` transaction wrapper. Static SQL cannot prove that an otherwise ordinary object is not a synonym, foreign table, view, or security-definer function, so database-side least privilege remains a necessary independent defense. Results may still be sensitive, so the agent must request only necessary columns and report a redacted summary.
 
 ### Authorized development or test write
 
@@ -117,7 +119,9 @@ Writes require a non-production writable target, complete SQL review, a bounded 
 - A current-task request for production connectivity, read query, schema inspection, or permission inspection authorizes that operation without a second confirmation. Resolve the target from the request or an explicit default production-read binding in the applicable project rules; never infer it from history, uniqueness, or naming similarity.
 - The launcher accepts `ping ... --allow-production` and reviewed `query ... --file <sql-file> --allow-production` operations for production.
 - The launcher does not inspect or require the login's actual read-only permissions. Profile access metadata describes the allowed launcher operation, not the account's effective grants.
-- Production query SQL receives stricter keyword checks plus fixed limits: 200 rows per statement, 256 displayed characters per field, 30-second query timeout, 5-second lock wait, and 64 KiB total captured output.
+- Production query SQL must contain exactly one statement and receives stricter quoted-identifier and engine-specific checks. SQL Server rejects three- and four-part names; both engines reject known database-escape or administrative identifiers.
+- The launcher executes the already-validated immutable snapshot and applies fixed limits: 200 rows, 256 displayed characters per field, 30-second query timeout, 5-second lock wait, and 64 KiB total streamed output. It terminates the client when the time or output limit is exceeded.
+- Production ignores `DBCTL_SQLCMD` and `DBCTL_PSQL` overrides. On POSIX systems it requires a resolved, non-group/world-writable client under `/usr` or `/opt`; on Windows it requires a resolved client under a Program Files root obtained from the system registry.
 - The launcher rejects production `exec` even when `--allow-production` and `--confirm-write` are present.
 - Production writes, DDL, permission changes, imports, restores, and maintenance remain outside this Skill.
 

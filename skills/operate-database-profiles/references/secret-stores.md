@@ -9,7 +9,7 @@
 | macOS | Login Keychain generic password | service `com.openai.codex.dbctl.database-password.v1`, account `<project>/<target>` |
 | Windows | Credential Manager generic credential | target `OpenAI.Codex.dbctl.database-password.v1/<project>/<target>` |
 
-Linux has no system provider in this version. Explicit `--credential-mode system` initialization fails before writing a profile. Inline mode remains available as the selected/default mode; never fall back from a failed system lookup to inline or another source.
+Linux has no system provider in this version. Explicit `--credential-mode system` initialization fails before writing a profile. Inline mode remains the testing default and an explicit production choice; never fall back from a failed system lookup to inline or another source.
 
 The identifier contains only validated project and target aliases. Do not include a host, database, username, customer name, production URL, or connection string.
 
@@ -32,7 +32,7 @@ dbctl credential set <project> <target>
 dbctl credential set <project> <target> --migrate-profile
 ```
 
-Use `profile init` only when the target does not exist. It defaults to schema-version-1 inline mode, collects connection metadata locally, prompts for the password twice through hidden input, and creates the protected profile with `Credential: INLINE`. Pass `--credential-mode system` to create a schema-version-2 profile with `Credential: ABSENT`; this mode never asks for or stores a password during initialization.
+Use `profile init` only when the target does not exist. Testing targets default to schema-version-1 inline mode, collect connection metadata locally, prompt for the password twice through hidden input, and create the protected profile with `Credential: INLINE`. Production targets require an explicit `--credential-mode inline|system`; prefer `system` where supported. System mode creates a schema-version-2 profile with `Credential: ABSENT` and never asks for or stores a password during initialization.
 
 For an existing inline profile, `credential set <project> <target>` prompts twice and atomically rotates the inline password without changing modes. For an existing system profile, the same command writes the newly entered password to the system store.
 
