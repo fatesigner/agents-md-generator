@@ -9,8 +9,9 @@ Keep profiles, credentials, connection metadata, raw client errors, and sensitiv
 
 ## Load only the required contract
 
-- Read [profile-contract.md](references/profile-contract.md) before resolving a project, target, profile, launcher, or query root.
+- Read [target-query-contract.md](references/target-query-contract.md) before resolving a project, target, launcher, or query root, or before running a ping or read query.
 - Read [safety-policy.md](references/safety-policy.md) before any connection, SQL execution, permission inspection, production operation, write, or TLS change.
+- Read [profile-contract.md](references/profile-contract.md) before profile initialization, profile repair, profile-schema diagnosis, or connection-metadata changes.
 - Read [secret-stores.md](references/secret-stores.md) before credential setup, status diagnosis, migration, or deletion.
 - Read [credential-modes.md](references/credential-modes.md) before choosing or changing inline/system credential behavior.
 - Read [architecture-and-responsibilities.md](references/architecture-and-responsibilities.md) before changing an execution boundary, adapter, client path, MCP tool, or UI workflow.
@@ -34,11 +35,21 @@ Keep profiles, credentials, connection metadata, raw client errors, and sensitiv
 
 MCP intentionally exposes no write, profile-mutation, credential-mutation, raw-command, or credential-retrieval tool.
 
+## Use the fast path for reviewed reads
+
+1. Resolve the exact project, target, and declared query root before creating SQL.
+2. Probe for the bundled `database_*` tools once. Use `database_list_targets` only for discovery or ambiguity, then use `database_inspect_target` with the final SQL file to combine exact-target description, local health, and preflight checks.
+3. If MCP is unavailable, batch independent no-contact metadata and health checks when the host supports it, but keep final SQL creation, complete review, preflight, and execution serial.
+4. Create and completely review the final bounded SQL file before invoking query preflight. Do not use an incomplete or missing file as an exploratory preflight.
+5. Run one preflight matching the final file, then execute the reviewed query. Do not repeat unchanged discovery, description, or doctor checks within the same operation.
+6. Repeat preflight whenever the target, operation, SQL path, or SQL content changes. Never reuse production authorization or preflight evidence across tasks.
+
 ## Execute safely
 
-- List and describe the target before database contact. Use `database_inspect_target` to combine safe target, client, credential-state, and preflight checks.
+- Discover targets only when needed and always describe the exact resolved target before database contact. Use `database_inspect_target` to combine exact-target, client, credential-state, and preflight checks.
 - Create SQL only under the declared project query root. Review the complete file before execution.
 - Select only necessary columns, use deterministic filters and row bounds, and prefer counts or aggregates before details.
+- When the user authorizes exactly one production read query, combine only the decisive aggregates and smallest required detail set in one compact statement and one result schema. Do not add speculative branches unrelated to the stated actors, keys, or scope.
 - For a current-task production ping/read/schema/permission request, resolve the target, review the SQL, and set `allowProduction: true` or `--allow-production` without asking for a second confirmation.
 - Treat `access: read-only` as workflow metadata, not proof of database grants. Production writes remain unsupported.
 - Never enable `trustServerCertificate` without explaining the identity-validation risk and obtaining explicit confirmation.
@@ -65,5 +76,7 @@ Never perform production writes, DDL, permission changes, imports, restores, or 
 Use DBeaver only when the user explicitly requests it. The user owns the connection and secret entry; DBeaver is not a fallback from a policy rejection.
 
 ## Report
+
+Lead with the user-visible answer and decisive database facts. Keep launcher mechanics and tool chronology to a short audit footer unless the user requests a full operational trace or the operation fails.
 
 Report the resolved project and target, environment, operation, whether database contact occurred, safe row or affected-row counts, verification performed, categorized failure when applicable, and residual permission/TLS/data-sensitivity/rollback risk. Never report profile contents, passwords, connection strings, production endpoints, account names, raw client errors, or unnecessary customer rows.

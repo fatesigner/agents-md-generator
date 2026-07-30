@@ -46,7 +46,40 @@ class OperateDatabaseProfilesPluginTests(unittest.TestCase):
                 / "SKILL.md"
             ).read_bytes(),
         )
-        self.assertFalse(any(path.name == "__pycache__" for path in self.plugin_root.rglob("*")))
+        self.assertFalse(
+            any(path.name == "__pycache__" for path in self.plugin_root.rglob("*"))
+        )
+
+    def test_fast_read_contract_is_packaged_from_canonical_source(self) -> None:
+        source_skill = PROJECT_ROOT / "skills" / "operate-database-profiles"
+        packaged_skill = (
+            self.plugin_root / "skills" / "operate-database-profiles"
+        )
+        contract_path = Path("references/target-query-contract.md")
+
+        self.assertEqual(
+            (packaged_skill / contract_path).read_bytes(),
+            (source_skill / contract_path).read_bytes(),
+        )
+
+        skill_text = (packaged_skill / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        safety_text = (
+            packaged_skill / "references" / "safety-policy.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "completely review the final bounded SQL file before invoking query preflight",
+            skill_text,
+        )
+        self.assertIn(
+            "authorizes exactly one production read query",
+            safety_text,
+        )
+        self.assertIn(
+            "never reuse production authorization or preflight evidence across tasks",
+            safety_text,
+        )
 
     def test_mcp_manifest_starts_only_the_bundled_stdio_server(self) -> None:
         config = json.loads(

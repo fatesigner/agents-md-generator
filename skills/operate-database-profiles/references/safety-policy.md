@@ -14,20 +14,23 @@ The stricter applicable global, repository, project, launcher, or database rule 
 ## Preflight
 
 1. Resolve the project and selected target.
-2. Run safe `list` and `describe` commands.
+2. Use safe `list` only for target discovery or ambiguity; always describe the exact resolved target before database contact.
 3. Confirm the environment, intended access, engine, and operation.
 4. Verify that the query root and controlled launcher exist.
 5. Confirm that no production target was inferred from prior context, uniqueness, or naming similarity.
 6. For production, resolve the target from the current request or an explicit default production-read target in the applicable project rules. Treat the current-task production read request as authorization and do not ask for a second confirmation.
-7. Use `preflight ... --json` when diagnosing routing, profile, credential, client, SQL-policy, or production-gate failures. It must reuse the execution validator and stop before database contact.
+7. For a query, create and completely review the final bounded SQL file before running one matching `preflight ... --json`. Do not use an incomplete or missing file as exploratory query preflight.
 8. Confirm the selected native-client variant before execution. Treat `version: NOT_PROBED` in preflight as intentional; use `doctor` for a local version probe that does not contact the database.
 9. Prefer the local `database_inspect_target` MCP tool when available to combine describe, doctor, and preflight without database contact. Treat every nested state literally and stop at the first failed step.
+10. Batch or parallelize independent no-contact metadata, launcher, query-root, and repository-side checks when the host supports it. Keep final SQL creation, complete review, preflight, and execution serial.
+11. Do not repeat unchanged list, describe, or doctor checks within the same operation. Repeat preflight whenever the target, operation, SQL path, or SQL content changes, and never reuse production authorization or preflight evidence across tasks.
 
 ## Read queries
 
 - Write SQL only in the configured query root.
 - Select only required columns and add a deterministic row bound.
 - Prefer `COUNT`, `EXISTS`, aggregates, and grouped summaries.
+- When the user authorizes exactly one production read query, combine only the decisive aggregates and smallest required detail rows into one reviewed statement with a compact result schema. Do not run separate count and detail queries, and do not add speculative branches unrelated to the stated actors, keys, or scope.
 - Avoid customer records, credentials, tokens, identity fields, and unrestricted text columns.
 - Verify expected columns, row bounds, and empty-result behavior.
 - Summarize sensitive results; do not paste raw production rows.
@@ -105,6 +108,8 @@ The stricter applicable global, repository, project, launcher, or database rule 
 - After repeated failure, stop, report attempted paths, and request a strategy change.
 
 ## Delivery
+
+Lead with the user-visible answer and decisive database facts. Keep launcher mechanics and tool chronology to a short audit footer unless the user requests a full operational trace or the operation fails.
 
 Report:
 
