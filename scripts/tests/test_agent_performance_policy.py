@@ -159,9 +159,14 @@ class AgentPerformancePolicyTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.workflow_policy)
 
-    def test_performance_policy_rejects_global_max_speed_defaults(self) -> None:
+    def test_performance_policy_routes_reasoning_without_global_xhigh(self) -> None:
+        self.assertIn("主代理普通任务默认使用 `high`", self.performance_policy)
+        self.assertIn("Plan mode 使用 `xhigh`", self.performance_policy)
+        self.assertIn("至少两个复杂度信号", self.performance_policy)
+        self.assertIn("两次实质性错误路径", self.performance_policy)
+        self.assertIn("等待时间不是推理复杂度信号", self.performance_policy)
         self.assertIn("Fast mode", self.performance_policy)
-        self.assertIn("全局默认值", self.performance_policy)
+        self.assertIn("不把 `xhigh`", self.performance_policy)
         self.assertIn("token/credit", self.performance_policy)
         self.assertIn("返工次数", self.performance_policy)
 

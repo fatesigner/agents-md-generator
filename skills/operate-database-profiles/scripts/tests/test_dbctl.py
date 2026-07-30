@@ -218,6 +218,18 @@ class DbctlTestCase(unittest.TestCase):
         self.assertFalse(any(value.startswith("-X") for value in args))
         self.assertNotIn("-C", args)
 
+    def test_production_sqlcmd_width_limits_do_not_use_incompatible_trim_flag(self) -> None:
+        args = dbctl.build_sqlcmd_args(
+            Path("/approved/sqlcmd"),
+            self.inline_profile,
+            "query",
+            Path("/query.sql"),
+            production_read=True,
+        )
+        self.assertIn("-y", args)
+        self.assertIn("-Y", args)
+        self.assertNotIn("-W", args)
+
     def test_psql_arguments_never_include_password(self) -> None:
         profile = dict(self.inline_profile)
         profile.update({"engine": "postgresql", "port": 5432})
@@ -623,6 +635,7 @@ class DbctlTestCase(unittest.TestCase):
             "Msg 50011, Level 16, State 1, Server private_server": "SQL_SERVER_50011",
             "connection timed out to private_endpoint": "NETWORK_TIMEOUT",
             "Sqlcmd: Error: mssql: private driver failure": "MSSQL_DRIVER",
+            "Sqlcmd: Error: The -W and -y options are mutually exclusive.": "CLIENT_ARGUMENT_CONFLICT",
             "Sqlcmd: Error: private client failure": "SQLCMD_CLIENT",
             "unclassified private endpoint text": "SQL_EXECUTION",
             "": "CLIENT_SILENT_FAILURE",

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable
-from typing import NamedTuple
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Callable, NamedTuple
+
+import build_operate_database_profiles_plugin as plugin_builder
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +36,92 @@ class DriftItem(NamedTuple):
     target_exists: bool
 
 
+class ManagedPlugin(NamedTuple):
+    name: str
+    marketplace: str
+    source_dir: Path
+
+
 def default_codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+
+
+def default_personal_marketplace() -> Path:
+    return (Path.home() / ".agents" / "plugins" / "marketplace.json").resolve()
+
+
+def read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid JSON: {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must contain a JSON object: {path}")
+    return payload
+
+
+def discover_managed_plugin(
+    marketplace_path: Path,
+    plugin_name: str = plugin_builder.SKILL_NAME,
+) -> ManagedPlugin | None:
+    marketplace_path = marketplace_path.expanduser().resolve()
+    if not marketplace_path.is_file():
+        return None
+
+    marketplace = read_json_object(marketplace_path, "Personal marketplace")
+    marketplace_name = marketplace.get("name")
+    if not isinstance(marketplace_name, str) or not marketplace_name:
+        raise ValueError(
+            f"Personal marketplace name is missing or invalid: {marketplace_path}"
+        )
+    plugins = marketplace.get("plugins")
+    if not isinstance(plugins, list):
+        raise ValueError(
+            f"Personal marketplace plugins must be a list: {marketplace_path}"
+        )
+
+    matching_entries = [
+        entry
+        for entry in plugins
+        if isinstance(entry, dict) and entry.get("name") == plugin_name
+    ]
+    if not matching_entries:
+        return None
+    if len(matching_entries) != 1:
+        raise ValueError(
+            f"Personal marketplace contains duplicate plugin entries: {plugin_name}"
+        )
+
+    source = matching_entries[0].get("source")
+    if not isinstance(source, dict) or source.get("source") != "local":
+        raise ValueError(
+            f"Managed plugin must use a local marketplace source: {plugin_name}"
+        )
+    source_path = source.get("path")
+    if not isinstance(source_path, str) or not source_path:
+        raise ValueError(f"Managed plugin source path is missing: {plugin_name}")
+
+    if len(marketplace_path.parents) < 3:
+        raise ValueError(
+            f"Cannot resolve marketplace root for managed plugin: {marketplace_path}"
+        )
+    marketplace_root = marketplace_path.parents[2].resolve()
+    plugin_source = Path(source_path).expanduser()
+    if not plugin_source.is_absolute():
+        plugin_source = marketplace_root / plugin_source
+    plugin_source = plugin_source.resolve()
+    if not plugin_source.is_relative_to(marketplace_root):
+        raise ValueError(
+            "Managed plugin source must stay inside the marketplace root: "
+            f"{plugin_source}"
+        )
+    if plugin_source.name != plugin_name:
+        raise ValueError(
+            "Managed plugin source directory must match the plugin name: "
+            f"{plugin_source}"
+        )
+
+    return ManagedPlugin(plugin_name, marketplace_name, plugin_source)
 
 
 def ensure_file(path: Path, label: str) -> Path:
@@ -122,6 +212,127 @@ def compare_tree(source: Path, target: Path, label: str) -> list[DriftItem]:
         elif source_file.read_bytes() != target_file.read_bytes():
             drift.append(DriftItem(f"{item_label}: content differs", True))
     return drift
+
+
+def plugin_manifest_path(plugin_dir: Path) -> Path:
+    return plugin_dir / ".codex-plugin" / "plugin.json"
+
+
+def set_plugin_version(plugin_dir: Path, version: str) -> None:
+    manifest_path = plugin_manifest_path(plugin_dir)
+    manifest = read_json_object(manifest_path, "Plugin manifest")
+    manifest["version"] = version
+    plugin_builder.write_json(manifest_path, manifest)
+
+
+def plugin_version(plugin_dir: Path) -> str:
+    manifest_path = plugin_manifest_path(plugin_dir)
+    manifest = read_json_object(manifest_path, "Plugin manifest")
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError(f"Plugin version is missing or invalid: {manifest_path}")
+    return version
+
+
+def next_plugin_version(
+    current_version: str,
+    now: datetime | None = None,
+) -> str:
+    base_version = current_version.split("+", 1)[0]
+    timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candidate = (
+        f"{base_version}+codex.local-{timestamp.strftime('%Y%m%d-%H%M%S')}"
+    )
+    if candidate == current_version:
+        timestamp += timedelta(seconds=1)
+        candidate = (
+            f"{base_version}+codex.local-{timestamp.strftime('%Y%m%d-%H%M%S')}"
+        )
+    return candidate
+
+
+def find_managed_plugin_drift(plugin: ManagedPlugin) -> list[DriftItem]:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        candidate = Path(temporary_directory) / plugin.name
+        plugin_builder.build_plugin(candidate)
+        target_manifest = plugin_manifest_path(plugin.source_dir)
+        if target_manifest.is_file():
+            candidate_version = plugin_version(candidate)
+            target_version = plugin_version(plugin.source_dir)
+            if candidate_version.split("+", 1)[0] == target_version.split("+", 1)[0]:
+                set_plugin_version(candidate, target_version)
+        return compare_tree(
+            candidate,
+            plugin.source_dir,
+            f"plugin/{plugin.name}@{plugin.marketplace}",
+        )
+
+
+def find_codex_cli() -> str:
+    executable = shutil.which("codex")
+    if executable is None:
+        raise ValueError(
+            "Codex CLI is required to reinstall managed plugins but was not found"
+        )
+    return executable
+
+
+def sync_managed_plugin(
+    plugin: ManagedPlugin,
+    *,
+    codex_executable: str,
+    now: datetime | None = None,
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> int:
+    print(f"plugin_source_dir: {plugin.source_dir}")
+    print(f"plugin_marketplace: {plugin.marketplace}")
+
+    previous_version = (
+        plugin_version(plugin.source_dir)
+        if plugin_manifest_path(plugin.source_dir).is_file()
+        else None
+    )
+    if plugin.source_dir.exists() and not plugin.source_dir.is_dir():
+        raise ValueError(
+            f"Managed plugin source is not a directory: {plugin.source_dir}"
+        )
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        candidate = Path(temporary_directory) / plugin.name
+        plugin_builder.build_plugin(candidate)
+        version = next_plugin_version(plugin_version(candidate), now)
+        if previous_version is not None and version == previous_version:
+            version = next_plugin_version(previous_version, now)
+        set_plugin_version(candidate, version)
+        if plugin.source_dir.exists():
+            remove_tree(plugin.source_dir)
+            print(f"[removed] {plugin.source_dir}")
+        shutil.copytree(candidate, plugin.source_dir)
+    print(f"[built] {plugin.name} {version} -> {plugin.source_dir}")
+
+    selector = f"{plugin.name}@{plugin.marketplace}"
+    try:
+        result = command_runner(
+            [codex_executable, "plugin", "add", selector, "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError(
+            f"Codex plugin reinstall could not run for {selector}: {error}"
+        ) from error
+    output = (result.stdout or "").strip()
+    error_output = (result.stderr or "").strip()
+    if output:
+        print(output)
+    if result.returncode != 0:
+        details = error_output or output or "no command output"
+        raise ValueError(
+            f"Codex plugin reinstall failed for {selector}: {details}"
+        )
+    print(f"[installed] {selector} {version}")
+    return 1
 
 
 def compare_project_skill(source: Path, target: Path, label: str) -> list[DriftItem]:
@@ -424,6 +635,19 @@ def main() -> int:
     subagents_target_dir = (codex_home / "agents").resolve()
     skills_source_dir = ensure_dir(PROJECT_ROOT / "skills", "Skills source directory")
     skills_target_dir = (codex_home / "skills").resolve()
+    personal_marketplace = default_personal_marketplace()
+    managed_plugin = discover_managed_plugin(personal_marketplace)
+    if managed_plugin is None:
+        print(
+            "[skipped] managed plugin is not configured in the personal marketplace: "
+            f"{plugin_builder.SKILL_NAME}"
+        )
+    else:
+        print(
+            "managed_plugin: "
+            f"{managed_plugin.name}@{managed_plugin.marketplace} "
+            f"-> {managed_plugin.source_dir}"
+        )
 
     drift_arguments = {
         "global_source": global_source,
@@ -436,6 +660,8 @@ def main() -> int:
         "skills_target_dir": skills_target_dir,
     }
     drift = find_managed_drift(**drift_arguments)
+    if managed_plugin is not None:
+        drift.extend(find_managed_plugin_drift(managed_plugin))
     for item in drift:
         print(f"[drift] {item.label}")
     if mode == "check":
@@ -451,6 +677,7 @@ def main() -> int:
             "then use --overwrite-runtime-drift only when replacement is intended"
         )
 
+    codex_executable = find_codex_cli() if managed_plugin is not None else None
     synced = {
         "global": sync_global_rules(global_source, global_target),
         "gemini_global": sync_global_rules(global_source, gemini_global_target),
@@ -461,9 +688,19 @@ def main() -> int:
         ),
         "subagents": sync_subagents(subagents_source_dir, subagents_target_dir),
         "skills": sync_skills(skills_source_dir, skills_target_dir),
+        "plugins": (
+            sync_managed_plugin(
+                managed_plugin,
+                codex_executable=codex_executable,
+            )
+            if managed_plugin is not None and codex_executable is not None
+            else 0
+        ),
     }
 
     remaining_drift = find_managed_drift(**drift_arguments)
+    if managed_plugin is not None:
+        remaining_drift.extend(find_managed_plugin_drift(managed_plugin))
     if remaining_drift:
         labels = "\n".join(f"- {item.label}" for item in remaining_drift[:20])
         raise ValueError(
@@ -473,6 +710,10 @@ def main() -> int:
     for label, count in synced.items():
         print(f"synced_{label}: {count}")
     print("[OK] Sync completed.")
+    if managed_plugin is not None:
+        print(
+            "[ACTION] Start a new Codex task to load the refreshed plugin MCP process."
+        )
     return 0
 
 

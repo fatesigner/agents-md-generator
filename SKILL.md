@@ -140,7 +140,10 @@ When the task requires syncing this skill package's global assets to the user-le
   - syncs this top-level `agents-md-generator` skill runtime assets into `${CODEX_HOME:-~/.codex}/skills/agents-md-generator/`
   - includes the Python sync implementation and source subagents in the installed skill runtime package; keeps the macOS/Linux and Windows entry scripts in the source checkout only
   - syncs local nested `skills/*/` directories into `${CODEX_HOME:-~/.codex}/skills/`
-  - accepts no command-line parameters; running the script always syncs all assets
+  - when `operate-database-profiles` is configured as a local plugin in the default personal marketplace, rebuilds its plugin source from the canonical skill, assigns a fresh Codex cachebuster, and reinstalls it with `codex plugin add`
+  - skips plugin installation when that personal marketplace entry is absent, rather than creating or rewriting marketplace configuration implicitly
+  - accepts `--check` for read-only drift detection and `--overwrite-runtime-drift` for explicitly replacing reviewed managed runtime or plugin-source drift
+  - requires a new Codex task after plugin refresh so the new MCP process and tool definitions are loaded
 
 ## Inheritance model
 

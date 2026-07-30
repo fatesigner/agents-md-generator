@@ -1642,6 +1642,8 @@ def classify_execution_error(output: str) -> str:
         return connection_category
     if "mssql:" in lowered:
         return "MSSQL_DRIVER"
+    if "sqlcmd:" in lowered and "mutually exclusive" in lowered:
+        return "CLIENT_ARGUMENT_CONFLICT"
     if "sqlcmd:" in lowered:
         return "SQLCMD_CLIENT"
     return "SQL_EXECUTION"
@@ -1824,7 +1826,6 @@ def build_sqlcmd_args(
                 str(PRODUCTION_MAX_FIELD_WIDTH),
                 "-w",
                 "4096",
-                "-W",
                 "-k",
                 "2",
             ]
