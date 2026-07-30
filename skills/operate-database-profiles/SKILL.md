@@ -1,107 +1,69 @@
 ---
 name: operate-database-profiles
-description: Operate or troubleshoot a real project database through project-scoped profiles and the controlled dbctl launcher. Use when the user wants to test connectivity; use SQL Server/sqlcmd, PostgreSQL/psql, or DBeaver against a real target; query live data; inspect schemas, tables, columns, indexes, views, stored procedures, or effective permissions; diagnose login, authentication, TLS, or database-access failures; perform an authorized development/test write; or run a current-task production read against an explicitly named or project-bound default target through operation-level SQL and bounded-output gates. Do not use for static review of repository SQL, migrations, schema definitions, or ORM code when no database connection or live data is required. Never read profile files directly.
+description: Operate or troubleshoot a real project database through project-scoped profiles and controlled database tools. Use for live SQL Server or PostgreSQL connectivity, queries, schema or permission inspection, authentication or TLS diagnosis, authorized development/test writes, DBeaver guidance, or a current-task production read against an explicitly named or project-bound target. Do not use for static review of repository SQL, migrations, schema definitions, or ORM code when no live database access is needed. Never read profile files directly.
 ---
 
 # Operate Database Profiles
 
-Use the controlled database launcher as the only agent-invoked credential-resolution and command-execution boundary. The OS provider, launcher process, and native client may touch the secret only as documented in the runtime chain. Keep profile contents out of model context, commands, logs, SQL files, and final responses.
+Keep profiles, credentials, connection metadata, raw client errors, and sensitive rows out of model context. Use only the bundled MCP tools or `dbctl`; never reconstruct a connection string or invoke a native database client directly.
 
-## Load the contract
+## Load only the required contract
 
-Read [references/profile-contract.md](references/profile-contract.md) before resolving a project, target, profile, launcher, or query root.
+- Read [profile-contract.md](references/profile-contract.md) before resolving a project, target, profile, launcher, or query root.
+- Read [safety-policy.md](references/safety-policy.md) before any connection, SQL execution, permission inspection, production operation, write, or TLS change.
+- Read [secret-stores.md](references/secret-stores.md) before credential setup, status diagnosis, migration, or deletion.
+- Read [credential-modes.md](references/credential-modes.md) before choosing or changing inline/system credential behavior.
+- Read [architecture-and-responsibilities.md](references/architecture-and-responsibilities.md) before changing an execution boundary, adapter, client path, MCP tool, or UI workflow.
 
-Read [references/safety-policy.md](references/safety-policy.md) before any connection attempt, SQL execution, permission inspection, production operation, write, or TLS-setting change.
+## Route the operation
 
-Read [references/secret-stores.md](references/secret-stores.md) before bootstrap, credential status, secret setup, inline-profile migration, deletion, or credential-provider diagnosis.
+1. Resolve the project identifier from the nearest applicable `AGENTS.md` or repository database declaration.
+2. Resolve production only from the current request or an explicit project default production-read binding. Never infer it from history, uniqueness, or a similar name.
+3. Classify the request as safe discovery, diagnosis, ping, read query, schema/permission inspection, test write, production read, credential maintenance, or unsupported production write.
+4. Prefer the bundled `database_*` MCP tools when they are available. Otherwise use `scripts/dbctl.sh` on macOS/Linux or `scripts\dbctl.cmd` on Windows. Use `${HOME}/.local/bin/dbctl.sh` only as a compatibility entry when no nearer rule overrides it.
+5. Stop if the controlled tool is missing or rejects the operation. Do not fall back to direct `sqlcmd`, `psql`, DBeaver, Docker, another driver, or another credential source.
 
-Read [references/credential-modes.md](references/credential-modes.md) before choosing a credential mode, explaining coexistence, planning migration, handling a missing system credential, or considering fallback behavior.
+## Use the narrowest controlled tool
 
-Read [references/architecture-and-responsibilities.md](references/architecture-and-responsibilities.md) before explaining ownership or an end-to-end call chain, changing a launcher boundary, adding a database adapter, or selecting a UI/client path.
+- Safe metadata: `database_list_targets` or `dbctl list|describe`.
+- Local target health without database contact: `database_inspect_target` or `dbctl doctor|preflight`.
+- Connectivity: `database_ping` or `dbctl ping`.
+- Reviewed read SQL: `database_query` or `dbctl query --file <sql-file>`.
+- Development/test write: CLI only, after preview and explicit confirmation, with `dbctl exec --file <sql-file> --confirm-write`.
+- Credential setup, migration, and deletion: interactive CLI only. The user enters secrets in a local terminal.
 
-## Follow the workflow
+MCP intentionally exposes no write, profile-mutation, credential-mutation, raw-command, or credential-retrieval tool.
 
-1. Determine the project identifier from the nearest applicable `AGENTS.md` or repository database declaration. Resolve a production target only from the current request or an explicit default production-read target in the applicable project rules; never infer it from history, uniqueness, or naming similarity.
-2. Locate the controlled launcher declared by project rules. Prefer the bundled `scripts/dbctl.sh` on macOS/Linux or `scripts/dbctl.cmd` on Windows. Use `${HOME}/.local/bin/dbctl.sh` only as a compatibility entry when no nearer rule overrides it. If the launcher is missing, stop instead of reading a profile directly.
-3. List safe target metadata through the launcher, then describe the selected target. Never use `cat`, `sed`, `rg`, `jq`, an editor, or a generic script to expose profile contents.
-4. Classify the operation as `ping`, `read-query`, `schema-inspection`, `permission-inspection`, `test-write`, `production-read`, or `production-write`.
-5. Apply the environment and operation gates in the safety policy. Treat a current-task request for production `ping`, read query, schema inspection, or permission inspection as authorization for that operation after the target is resolved; do not request a second confirmation.
-6. For SQL execution, create or update an auditable `.sql` file only in the project query root. Review the complete SQL before execution.
-7. Execute only through the controlled launcher. Do not reconstruct a connection string or invoke a database client with credentials directly.
-8. Verify the result in proportion to the operation: connectivity for `ping`, row/shape assertions for reads, and before/after plus affected-row checks for writes.
-9. Report the project, target, environment, operation, result, verification, and residual risk without exposing credentials, production endpoints, customer data, or raw sensitive errors.
+## Execute safely
 
-## Bootstrap a machine safely
+- List and describe the target before database contact. Use `database_inspect_target` to combine safe target, client, credential-state, and preflight checks.
+- Create SQL only under the declared project query root. Review the complete file before execution.
+- Select only necessary columns, use deterministic filters and row bounds, and prefer counts or aggregates before details.
+- For a current-task production ping/read/schema/permission request, resolve the target, review the SQL, and set `allowProduction: true` or `--allow-production` without asking for a second confirmation.
+- Treat `access: read-only` as workflow metadata, not proof of database grants. Production writes remain unsupported.
+- Never enable `trustServerCertificate` without explaining the identity-validation risk and obtaining explicit confirmation.
+- Keep the selected native client fixed for the complete operation and permitted retries. ODBC `mssql-tools18` is preferred before Go `sqlcmd` during pre-execution discovery; never switch clients after database contact.
+- Use idempotent retry only for reviewed non-production SQL that is safe to replay after an ambiguous connection close. Never retry production automatically or add an outer retry loop.
 
-Use the platform entry from the installed Skill directory:
+## Preserve diagnostic meaning
 
-```sh
-scripts/bootstrap.sh
-scripts/dbctl.sh doctor
-```
+Use structured output and preserve `stage`, `category`, `databaseContacted`, `retryable`, `attempts`, and the selected client variant. Treat:
 
-```cmd
-scripts\bootstrap.cmd
-scripts\dbctl.cmd doctor
-```
+- `doctor` as local profile/client health only;
+- `preflight` as execution-path validation without native-client startup;
+- `ping` as connectivity only;
+- successful query execution as neither proof of least privilege nor permission safety outside the reviewed operation.
 
-Bootstrap creates the platform-local profile root and applies owner-only permissions or ACLs. It does not install `sqlcmd` or `psql`, create profiles, migrate passwords, or modify credentials.
+Do not parse or repeat raw native-client output. After deterministic failure, run one matching preflight instead of retrying. Stop after the applicable retry ceiling.
 
-Prerequisites are Python 3, the native client required by each configured engine (`sqlcmd` for SQL Server or `psql` for PostgreSQL), and on Windows either Windows PowerShell or PowerShell 7. Bootstrap reports missing clients without installing them. Do not bypass an organization-managed PowerShell execution policy.
+## Keep write and credential boundaries explicit
 
-On a new machine with no project metadata, the user runs the interactive local initializer so internal connection metadata does not enter chat or agent logs:
+For a development/test write, first run an equivalent bounded `SELECT`, verify the expected keys and row count, obtain explicit confirmation, execute one reviewed transactional SQL file through `dbctl exec`, then verify affected rows and post-state.
 
-```text
-dbctl profile init <project> <target> [--engine sqlserver|postgresql] [--credential-mode inline|system]
-```
+Never perform production writes, DDL, permission changes, imports, restores, or maintenance through this workflow. Never run unattended `credential set`, credential migration, or credential deletion. There is no credential `get` path.
 
-The initializer defaults to SQL Server and, for testing targets, an inline schema-version-1 profile. Pass `--engine postgresql` for PostgreSQL. A production target must explicitly select `--credential-mode system` or `--credential-mode inline`; prefer the system store on supported platforms so production profile creation never silently falls back to an inline password. Production profiles may describe either `read-only` or `read-write` account intent, but production operations remain read-only and retain every production authorization gate. System mode creates a schema-version-2 profile with `Credential: ABSENT`; then run `dbctl credential set <project> <target>` locally to store the password in the platform credential store. Inline mode prompts for the password twice through hidden local input and writes the protected profile with owner-only permissions. The user, not the agent, supplies every password prompt. Then the agent may use `list`, `describe`, `credential status`, and `doctor` for safe verification.
+Use DBeaver only when the user explicitly requests it. The user owns the connection and secret entry; DBeaver is not a fallback from a policy rejection.
 
-## Use safe launcher commands
+## Report
 
-Resolve the launcher and project first, then use the narrowest command:
-
-```sh
-"$DBCTL" list "$PROJECT"
-"$DBCTL" describe "$PROJECT" "$TARGET"
-"$DBCTL" ping "$PROJECT" "$TARGET"
-"$DBCTL" query "$PROJECT" "$TARGET" --file "$SQL_FILE"
-"$DBCTL" exec "$PROJECT" "$TARGET" --file "$SQL_FILE" --confirm-write
-"$DBCTL" credential status "$PROJECT" "$TARGET"
-```
-
-Add production flags only when the launcher, project rules, safety policy, and current-task production-read request allow them. The agent must add `--allow-production` itself without a second confirmation after resolving the target. Never bypass a launcher rejection by invoking `sqlcmd`, `psql`, `mysql`, DBeaver, Docker, or another path.
-
-For a production read, resolve the target from the current request or the applicable project's explicit default production-read binding. The current-task request itself authorizes that read, so review the complete bounded SQL and use `query ... --allow-production` without asking for a second confirmation. The launcher intentionally does not inspect or prove the login's effective database permissions. It must execute exactly one validated SQL snapshot, reject dangerous identifiers even when quoted, reject SQL Server cross-database or cross-server names, apply row, field-width, timeout, lock-wait, and streaming total-output limits, and reject every production `exec` operation.
-
-When the user explicitly requests DBeaver, treat it as a separate user-owned UI workflow: the user configures the connection and handles the secret, while the same target, production-request authorization, SQL-review, and output controls remain applicable. It is never a fallback from a launcher rejection.
-
-There is no public credential `get` command. Never invoke `credential set` or `credential delete` as an unattended agent action. The user must run interactive secret setup in a local terminal so the password is not captured in model context or tool output.
-
-## Keep SQL bounded
-
-- Select only required columns; avoid `SELECT *`.
-- Add deterministic filters and an explicit row bound for exploratory reads.
-- Prefer counts, aggregates, and existence checks before retrieving row data.
-- Do not emit customer records or sensitive fields into the conversation.
-- For production, keep the requested result below the launcher's fixed limits; use an aggregate when complete population coverage is required because row output is capped.
-- Keep every production query to one statement. Do not use SQL Server three-part or four-part object names, linked servers, PostgreSQL dblink/FDW execution paths, Unicode-escaped identifiers, or dollar-quoted bodies.
-- For writes, run an equivalent `SELECT`, verify expected row count, use a transaction, and verify the result.
-- Reject SQLCMD meta-commands, shell escapes, external file includes, credential literals, and connection strings.
-- Do not treat command names such as `query` as the only security boundary; rely on the launcher's SQL validation and production-operation gates. A dedicated least-privilege database account is recommended as defense in depth, but the launcher does not require or verify it.
-
-## Handle failures safely
-
-- Preserve the launcher error category and suppress raw connection details.
-- Do not read a profile to diagnose authentication, TLS, DNS, or database-access failures.
-- Do not lower encryption or certificate validation to make a connection succeed without explicit user confirmation.
-- Respect the applicable retry limit. After the limit, report attempts and request a strategy change.
-- Do not fall back to DBeaver or browser/UI automation unless the user explicitly requests that path.
-
-## Stop at the enforced boundary
-
-Treat profile metadata such as `access: read-only` as descriptive of the permitted `dbctl` workflow, not proof of the login's database grants. The launcher intentionally does not inspect those grants and must not claim that the account itself is read-only.
-
-Allow a production read only when the current task requests the operation, the target is explicitly named or resolved from the applicable project's explicit default production-read binding, the reviewed single-statement SQL snapshot passes the engine-specific production validator, `--allow-production` is present, and the fixed production limits remain enabled. Do not ask for a second confirmation and do not reuse authorization from another task. An account with database write privileges may still be used through this workflow, but only read operations may be submitted through `dbctl`.
-
-Do not implement production writes in this workflow. If a user requests one, stop and require a separately approved maintenance workflow with a temporary least-privilege credential, reviewed SQL, transaction controls, rollback plan, and commit-time confirmation.
+Report the resolved project and target, environment, operation, whether database contact occurred, safe row or affected-row counts, verification performed, categorized failure when applicable, and residual permission/TLS/data-sensitivity/rollback risk. Never report profile contents, passwords, connection strings, production endpoints, account names, raw client errors, or unnecessary customer rows.

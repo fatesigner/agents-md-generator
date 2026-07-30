@@ -126,4 +126,10 @@ See [credential-modes.md](credential-modes.md) for mode coexistence, strict per-
 
 ## Consumption boundary
 
-Allow only the controlled launcher to parse a real profile and retrieve a password. The agent may inspect safe `list`, `describe`, `credential status`, `doctor`, validation status, and categorized errors returned by the launcher. It must not inspect or reproduce the underlying credential values.
+Allow only the shared `dbctl` core, reached through the controlled CLI or local STDIO MCP adapter, to parse a real profile and retrieve a password. The MCP adapter may request a core operation but must never accept, inspect, log, or return the credential. The agent may inspect safe `list`, `describe`, `credential status`, `doctor`, validation status, and categorized errors returned by the controlled interfaces. It must not inspect or reproduce the underlying credential values.
+
+Validate profile schema, target-context binding, connection-metadata shape, credential-mode exclusivity, and deterministic secret reference as separate fail-closed steps. Report only safe categories such as `PROFILE_SCHEMA_INVALID`, `PROFILE_CONTEXT_MISMATCH`, `PROFILE_CONNECTION_METADATA_INVALID`, `PROFILE_MODE_CONFLICT`, `PROFILE_INLINE_INVALID`, `PROFILE_SYSTEM_INVALID`, and `SECRET_REFERENCE_MISMATCH`; never report the rejected field value.
+
+`preflight` may parse an inline protected profile inside `dbctl` and may check system-credential presence, but it must not retrieve a system-backed credential value, pass any credential to a child process, or start the native client. Report database connectivity and authorization as `NOT_CHECKED`.
+
+For a credential-bearing operation, clear the inline password field from the in-memory profile immediately after resolving the child-process secret and clear the selected client environment in `finally`. Treat this as reference minimization, not guaranteed memory erasure.

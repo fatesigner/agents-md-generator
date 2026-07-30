@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "dbctl.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "dbctl_core.py"
 SPEC = importlib.util.spec_from_file_location("dbctl", MODULE_PATH)
 assert SPEC and SPEC.loader
 dbctl = importlib.util.module_from_spec(SPEC)
@@ -240,6 +240,113 @@ class DbctlTestCase(unittest.TestCase):
                 dbctl.find_sqlcmd(production=True)
             with self.assertRaisesRegex(dbctl.DbctlError, "override is not allowed"):
                 dbctl.find_psql(production=True)
+
+    def test_macos_sqlcmd_selection_prefers_odbc_then_falls_back_to_go(self) -> None:
+        odbc = Path("/opt/homebrew/opt/mssql-tools18/bin/sqlcmd")
+        go = Path("/opt/homebrew/bin/sqlcmd")
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            dbctl.sys,
+            "platform",
+            "darwin",
+        ), mock.patch.object(
+            dbctl.shutil,
+            "which",
+            return_value=str(go),
+        ), mock.patch.object(
+            dbctl.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path in {odbc, go},
+        ), mock.patch.object(
+            dbctl.os,
+            "access",
+            return_value=True,
+        ):
+            self.assertEqual(dbctl.find_sqlcmd(), odbc)
+
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            dbctl.sys,
+            "platform",
+            "darwin",
+        ), mock.patch.object(
+            dbctl.shutil,
+            "which",
+            return_value=str(go),
+        ), mock.patch.object(
+            dbctl.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path == go,
+        ), mock.patch.object(
+            dbctl.os,
+            "access",
+            return_value=True,
+        ):
+            self.assertEqual(dbctl.find_sqlcmd(), go)
+
+    def test_nonproduction_sqlcmd_override_remains_explicit_and_first(self) -> None:
+        override = self.root / "custom-sqlcmd"
+        override.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        override.chmod(0o755)
+        with mock.patch.dict(
+            os.environ,
+            {"DBCTL_SQLCMD": str(override)},
+        ), mock.patch.object(
+            dbctl,
+            "default_sqlcmd_candidates",
+            return_value=[Path("/opt/homebrew/opt/mssql-tools18/bin/sqlcmd")],
+        ):
+            self.assertEqual(dbctl.find_sqlcmd(), override)
+
+    def test_production_uses_odbc_candidate_without_allowing_override(self) -> None:
+        odbc = Path("/opt/homebrew/opt/mssql-tools18/bin/sqlcmd")
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            dbctl.sys,
+            "platform",
+            "darwin",
+        ), mock.patch.object(
+            dbctl.shutil,
+            "which",
+            return_value="/opt/homebrew/bin/sqlcmd",
+        ), mock.patch.object(
+            dbctl.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path == odbc,
+        ), mock.patch.object(
+            dbctl.os,
+            "access",
+            return_value=True,
+        ), mock.patch.object(
+            dbctl,
+            "validate_production_client_path",
+            return_value=odbc,
+        ) as validate:
+            self.assertEqual(dbctl.find_sqlcmd(production=True), odbc)
+        validate.assert_called_once_with(odbc)
+
+    def test_client_metadata_identifies_odbc_without_exposing_native_output(self) -> None:
+        odbc = Path("/opt/homebrew/opt/mssql-tools18/bin/sqlcmd")
+        result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "Microsoft (R) SQL Server Command Line Tool\n"
+                "Version 18.6.0002.1 Linux\n"
+            ),
+        )
+        with mock.patch.object(
+            dbctl.subprocess,
+            "run",
+            return_value=result,
+        ) as run:
+            metadata = dbctl.client_metadata(
+                "sqlserver",
+                odbc,
+                probe_version=True,
+            )
+        self.assertEqual(metadata["variant"], "ODBC")
+        self.assertEqual(metadata["version"], "18.6.0002.1")
+        self.assertEqual(run.call_args.args[0], [str(odbc), "-?"])
 
     @unittest.skipIf(os.name == "nt", "POSIX path trust policy")
     def test_production_rejects_database_client_outside_system_roots(self) -> None:
@@ -481,9 +588,12 @@ class DbctlTestCase(unittest.TestCase):
 
     def test_ping_error_categories_are_redacted(self) -> None:
         cases = {
+            "": "CLIENT_SILENT_FAILURE",
             "server not found": "DNS",
             "Connection refused": "TCP_REFUSED",
             "connection timed out": "NETWORK_TIMEOUT",
+            "dial tcp private_endpoint: connect: operation timed out": "NETWORK_TIMEOUT",
+            "unable to open tcp connection with host private_endpoint": "NETWORK_CONNECT",
             "Network is unreachable": "NETWORK_UNREACHABLE",
             "x509 certificate invalid": "TLS",
             "server does not support SSL, but SSL was required": "TLS",
@@ -494,12 +604,228 @@ class DbctlTestCase(unittest.TestCase):
             "FATAL: no pg_hba.conf entry for host private_host": "PG_HBA_REJECTED",
             "server closed the connection unexpectedly": "CONNECTION_CLOSED",
             "could not receive data from server: Connection reset by peer": "CONNECTION_CLOSED",
+            "EOF": "CONNECTION_CLOSED",
             "Password:": "CLIENT_INTERACTIVE",
             "unclassified private endpoint text": "UNKNOWN",
         }
         for output, expected in cases.items():
             with self.subTest(output=output):
                 self.assertEqual(dbctl.classify_ping_error(output), expected)
+
+    def test_execution_error_categories_are_redacted(self) -> None:
+        cases = {
+            "Lock request time out period exceeded.": "LOCK_TIMEOUT",
+            "Transaction was deadlocked and has been chosen as the deadlock victim.": "DEADLOCK",
+            "The UPDATE statement conflicted with the FOREIGN KEY constraint 'private_name'.": "CONSTRAINT",
+            "Violation of UNIQUE KEY constraint 'private_name'. Cannot insert duplicate key.": "CONSTRAINT",
+            "Incorrect syntax near 'private_value'.": "SQL_SYNTAX",
+            "The UPDATE permission was denied on the object 'private_table'.": "PERMISSION_DENIED",
+            "Msg 50011, Level 16, State 1, Server private_server": "SQL_SERVER_50011",
+            "connection timed out to private_endpoint": "NETWORK_TIMEOUT",
+            "Sqlcmd: Error: mssql: private driver failure": "MSSQL_DRIVER",
+            "Sqlcmd: Error: private client failure": "SQLCMD_CLIENT",
+            "unclassified private endpoint text": "SQL_EXECUTION",
+            "": "CLIENT_SILENT_FAILURE",
+        }
+        for output, expected in cases.items():
+            with self.subTest(output=output):
+                self.assertEqual(dbctl.classify_execution_error(output), expected)
+
+    def test_client_error_signals_use_a_fixed_safe_vocabulary(self) -> None:
+        output = (
+            "Sqlcmd: Error: mssql: failed to connect to "
+            "private-host.example.invalid as private_user"
+        )
+        self.assertEqual(
+            dbctl.client_error_signals(output),
+            "connect,error,failed,invalid,mssql,sqlcmd",
+        )
+        self.assertNotIn("private", dbctl.client_error_signals(output))
+
+    def test_nonproduction_query_does_not_retry_without_confirmation(self) -> None:
+        result = SimpleNamespace(returncode=1, stdout="EOF")
+        with mock.patch.object(dbctl.subprocess, "run", return_value=result) as run:
+            returned, attempts = dbctl.run_nonproduction_client(
+                ["/approved/sqlcmd"],
+                {},
+                "query",
+            )
+        self.assertEqual(returned.returncode, 1)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(run.call_count, 1)
+
+    def test_nonproduction_query_retries_when_idempotent_confirmed(self) -> None:
+        results = [
+            SimpleNamespace(returncode=1, stdout="EOF"),
+            SimpleNamespace(returncode=0, stdout="answer\n"),
+        ]
+        with mock.patch.object(
+            dbctl.subprocess,
+            "run",
+            side_effect=results,
+        ) as run, mock.patch.object(dbctl.time, "sleep") as sleep:
+            result, attempts = dbctl.run_nonproduction_client(
+                ["/approved/sqlcmd"],
+                {},
+                "query",
+                confirm_idempotent_retry=True,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_nonproduction_exec_never_retries_connection_closed(self) -> None:
+        result = SimpleNamespace(returncode=1, stdout="EOF")
+        with mock.patch.object(dbctl.subprocess, "run", return_value=result) as run:
+            returned, attempts = dbctl.run_nonproduction_client(
+                ["/approved/sqlcmd"],
+                {},
+                "exec",
+            )
+        self.assertEqual(returned.returncode, 1)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(run.call_count, 1)
+
+    def test_nonproduction_exec_retries_connection_closed_when_idempotent_confirmed(
+        self,
+    ) -> None:
+        results = [
+            SimpleNamespace(returncode=1, stdout="EOF"),
+            SimpleNamespace(returncode=0, stdout="updated\n"),
+        ]
+        with mock.patch.object(
+            dbctl.subprocess,
+            "run",
+            side_effect=results,
+        ) as run, mock.patch.object(dbctl.time, "sleep") as sleep:
+            returned, attempts = dbctl.run_nonproduction_client(
+                ["/approved/sqlcmd"],
+                {},
+                "exec",
+                confirm_idempotent_retry=True,
+            )
+        self.assertEqual(returned.returncode, 0)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_nonproduction_idempotent_exec_does_not_retry_nontransient_error(
+        self,
+    ) -> None:
+        result = SimpleNamespace(
+            returncode=1,
+            stdout="Violation of UNIQUE KEY constraint 'private_name'.",
+        )
+        with mock.patch.object(dbctl.subprocess, "run", return_value=result) as run:
+            returned, attempts = dbctl.run_nonproduction_client(
+                ["/approved/sqlcmd"],
+                {},
+                "exec",
+                confirm_idempotent_retry=True,
+            )
+        self.assertEqual(returned.returncode, 1)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(run.call_count, 1)
+
+    def test_exec_idempotent_retry_flag_requires_confirm_write(self) -> None:
+        sql_file = self.query_root / "idempotent-write.sql"
+        sql_file.write_text("UPDATE dbo.Sample SET Value = Value;\n", encoding="utf-8")
+        with self.assertRaisesRegex(dbctl.DbctlError, "requires --confirm-write"):
+            dbctl.run_database_command(
+                [
+                    "exec",
+                    "sample-project",
+                    "backend-test",
+                    "--file",
+                    str(sql_file),
+                    "--confirm-idempotent-retry",
+                ]
+            )
+
+    def test_query_idempotent_retry_flag_retries_transient_failure(self) -> None:
+        sql_file = self.query_root / "query.sql"
+        sql_file.write_text("SELECT 1;\n", encoding="utf-8")
+        results = [
+            SimpleNamespace(returncode=1, stdout="EOF"),
+            SimpleNamespace(returncode=0, stdout="answer\n"),
+        ]
+        with mock.patch.object(
+            dbctl,
+            "find_sqlcmd",
+            return_value=Path("/approved/sqlcmd"),
+        ) as find_sqlcmd, mock.patch.object(
+            dbctl.subprocess,
+            "run",
+            side_effect=results,
+        ) as run, mock.patch.object(
+            dbctl.time,
+            "sleep",
+        ), mock.patch(
+            "sys.stdout"
+        ) as stdout:
+            result = dbctl.run_database_command(
+                [
+                    "query",
+                    "sample-project",
+                    "backend-test",
+                    "--file",
+                    str(sql_file),
+                    "--confirm-idempotent-retry",
+                ]
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(find_sqlcmd.call_count, 1)
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(
+            all(
+                call.args[0][0] == "/approved/sqlcmd"
+                for call in run.call_args_list
+            )
+        )
+        rendered = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        self.assertIn("IdempotentRetry: ENABLED", rendered)
+        self.assertIn("TransientRetries: 1", rendered)
+
+    def test_exec_idempotent_retry_flag_retries_transient_connection_close(
+        self,
+    ) -> None:
+        sql_file = self.query_root / "idempotent-write.sql"
+        sql_file.write_text("UPDATE dbo.Sample SET Value = Value;\n", encoding="utf-8")
+        results = [
+            SimpleNamespace(returncode=1, stdout="EOF"),
+            SimpleNamespace(returncode=0, stdout="updated\n"),
+        ]
+        with mock.patch.object(
+            dbctl,
+            "find_sqlcmd",
+            return_value=Path("/approved/sqlcmd"),
+        ), mock.patch.object(
+            dbctl.subprocess,
+            "run",
+            side_effect=results,
+        ) as run, mock.patch.object(
+            dbctl.time,
+            "sleep",
+        ), mock.patch(
+            "sys.stdout"
+        ) as stdout:
+            result = dbctl.run_database_command(
+                [
+                    "exec",
+                    "sample-project",
+                    "backend-test",
+                    "--file",
+                    str(sql_file),
+                    "--confirm-write",
+                    "--confirm-idempotent-retry",
+                ]
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_count, 2)
+        rendered = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        self.assertIn("IdempotentRetry: ENABLED", rendered)
+        self.assertIn("TransientRetries: 1", rendered)
 
     def test_secret_backed_profile_rejects_any_password_field(self) -> None:
         migrated = dict(self.inline_profile)
@@ -530,10 +856,244 @@ class DbctlTestCase(unittest.TestCase):
     def test_missing_database_target_returns_redacted_cli_error(self) -> None:
         with mock.patch("sys.stderr") as stderr:
             result = dbctl.main(["ping", "sample-project"])
-        self.assertEqual(result, 1)
+        self.assertEqual(result, 30)
         output = "".join(call.args[0] for call in stderr.write.call_args_list if call.args)
         self.assertIn("requires a project and target", output)
         self.assertNotIn("Traceback", output)
+
+    def test_help_is_a_successful_command(self) -> None:
+        with mock.patch("sys.stdout") as stdout, mock.patch("sys.stderr") as stderr:
+            result = dbctl.main(["--help"])
+        self.assertEqual(result, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        self.assertIn("Usage:", output)
+        self.assertNotIn("unknown command", output)
+        self.assertFalse(stderr.write.called)
+
+    def test_version_json_reports_content_build_id(self) -> None:
+        with mock.patch("sys.stdout") as stdout:
+            result = dbctl.main(["version", "--json"])
+        self.assertEqual(result, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(payload["version"], dbctl.DBCTL_VERSION)
+        self.assertEqual(len(payload["buildId"]), 64)
+        self.assertIn("operation-preflight", payload["features"])
+        self.assertIn("programmatic-json-api", payload["features"])
+
+    def test_programmatic_json_api_returns_one_safe_payload(self) -> None:
+        exit_code, payload = dbctl.invoke_json(["version"])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["version"], "2.2.0")
+
+    def test_programmatic_json_api_suppresses_unstructured_output(self) -> None:
+        with mock.patch.object(
+            dbctl,
+            "main",
+            side_effect=lambda argv: print("unexpected raw output") or 1,
+        ):
+            exit_code, payload = dbctl.invoke_json(["version"])
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["category"], "PROGRAMMATIC_OUTPUT_INVALID")
+        self.assertNotIn("unexpected raw output", json.dumps(payload))
+
+    def test_list_json_returns_only_safe_target_metadata(self) -> None:
+        with mock.patch("sys.stdout") as stdout:
+            result = dbctl.main(["list", "sample-project", "--json"])
+        self.assertEqual(result, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(
+            payload["targets"],
+            [
+                {
+                    "target": "backend-test",
+                    "environment": "testing",
+                    "access": "read-write",
+                }
+            ],
+        )
+        self.assertNotIn("SYNTHETIC_SECRET", output)
+        self.assertNotIn("EXAMPLE_HOST", output)
+
+    def test_profile_validation_reports_safe_field_categories(self) -> None:
+        cases = [
+            ({"schemaVersion": 99}, "PROFILE_SCHEMA_INVALID"),
+            ({"environment": "production"}, "PROFILE_CONTEXT_MISMATCH"),
+            ({"port": 0}, "PROFILE_CONNECTION_METADATA_INVALID"),
+        ]
+        for updates, expected in cases:
+            with self.subTest(category=expected):
+                profile = dict(self.inline_profile)
+                profile.update(updates)
+                self.write_secure(self.profile_file, profile)
+                with self.assertRaises(dbctl.DbctlError) as raised:
+                    dbctl.load_profile(self.context())
+                self.assertEqual(raised.exception.stage, "PROFILE")
+                self.assertEqual(raised.exception.category, expected)
+                self.assertFalse(raised.exception.database_contacted)
+                self.write_secure(self.profile_file, self.inline_profile)
+
+    def test_json_error_contract_identifies_preconnection_failure(self) -> None:
+        with mock.patch("sys.stdout") as stdout:
+            result = dbctl.main(["ping", "sample-project", "--json"])
+        self.assertEqual(result, 30)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(payload["stage"], "ARGUMENT")
+        self.assertEqual(payload["category"], "ARGUMENT_INVALID")
+        self.assertFalse(payload["databaseContacted"])
+        self.assertEqual(payload["attempts"], 1)
+
+    def test_doctor_json_states_database_is_not_checked(self) -> None:
+        with mock.patch.object(
+            dbctl,
+            "find_sqlcmd",
+            return_value=Path("/opt/homebrew/opt/mssql-tools18/bin/sqlcmd"),
+        ), mock.patch.object(
+            dbctl,
+            "probe_client_identity",
+            return_value=("ODBC", "18.6.0002.1"),
+        ), mock.patch("sys.stdout") as stdout:
+            result = dbctl.main(
+                ["doctor", "sample-project", "backend-test", "--json"]
+            )
+        self.assertEqual(result, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(payload["profileState"], "OK")
+        self.assertEqual(payload["credentialState"], "INLINE")
+        self.assertEqual(payload["clientDetails"]["sqlserver"]["variant"], "ODBC")
+        self.assertEqual(
+            payload["clientDetails"]["sqlserver"]["version"],
+            "18.6.0002.1",
+        )
+        self.assertEqual(payload["databaseConnectivity"], "NOT_CHECKED")
+        self.assertEqual(payload["databaseAuthorization"], "NOT_CHECKED")
+        self.assertFalse(payload["databaseContacted"])
+
+    def test_preflight_reuses_validation_without_resolving_password_or_connecting(
+        self,
+    ) -> None:
+        sql_file = self.query_root / "preflight.sql"
+        sql_file.write_text("SELECT 1;\n", encoding="utf-8")
+        with mock.patch.object(
+            dbctl,
+            "find_sqlcmd",
+            return_value=Path("/opt/homebrew/opt/mssql-tools18/bin/sqlcmd"),
+        ), mock.patch.object(
+            dbctl,
+            "resolve_password",
+        ) as resolve_password, mock.patch.object(
+            dbctl.subprocess,
+            "run",
+        ) as run, mock.patch(
+            "sys.stdout"
+        ) as stdout:
+            result = dbctl.main(
+                [
+                    "preflight",
+                    "sample-project",
+                    "backend-test",
+                    "--operation",
+                    "query",
+                    "--file",
+                    str(sql_file),
+                    "--json",
+                ]
+            )
+        self.assertEqual(result, 0)
+        resolve_password.assert_not_called()
+        run.assert_not_called()
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(payload["sqlState"], "OK")
+        self.assertEqual(payload["retryPolicy"], "SINGLE_ATTEMPT")
+        self.assertEqual(payload["client"]["variant"], "ODBC")
+        self.assertEqual(payload["client"]["version"], "NOT_PROBED")
+        self.assertFalse(payload["databaseContacted"])
+
+    def test_production_query_preflight_rejects_retry(self) -> None:
+        self.configure_production_target()
+        sql_file = self.query_root / "production-preflight.sql"
+        sql_file.write_text("SELECT 1;\n", encoding="utf-8")
+        with mock.patch("sys.stdout") as stdout:
+            result = dbctl.main(
+                [
+                    "preflight",
+                    "sample-project",
+                    "backend-test",
+                    "--operation",
+                    "query",
+                    "--file",
+                    str(sql_file),
+                    "--allow-production",
+                    "--confirm-idempotent-retry",
+                    "--json",
+                ]
+            )
+        self.assertEqual(result, 30)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(payload["category"], "PRODUCTION_RETRY_REJECTED")
+        self.assertFalse(payload["databaseContacted"])
+
+    def test_ping_json_distinguishes_connectivity_from_query_authorization(self) -> None:
+        result = SimpleNamespace(returncode=0, stdout="1\n")
+        with mock.patch.object(
+            dbctl,
+            "find_sqlcmd",
+            return_value=Path("/approved/sqlcmd"),
+        ), mock.patch.object(
+            dbctl.subprocess,
+            "run",
+            return_value=result,
+        ), mock.patch(
+            "sys.stdout"
+        ) as stdout:
+            returncode = dbctl.main(
+                ["ping", "sample-project", "backend-test", "--json"]
+            )
+        self.assertEqual(returncode, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list if call.args)
+        payload = json.loads(output)
+        self.assertEqual(payload["connection"], "OK")
+        self.assertEqual(payload["queryPolicy"], "NOT_EVALUATED")
+        self.assertEqual(payload["databaseAuthorization"], "NOT_PROVEN")
+        self.assertTrue(payload["databaseContacted"])
+
+    def test_database_run_clears_inline_profile_password_before_client_start(
+        self,
+    ) -> None:
+        observed: list[tuple[str, str]] = []
+
+        def client_environment(profile: dict, password: str) -> dict[str, str]:
+            observed.append((profile["password"], password))
+            return {"SQLCMDPASSWORD": password}
+
+        result = SimpleNamespace(returncode=0, stdout="1\n")
+        with mock.patch.object(
+            dbctl,
+            "find_sqlcmd",
+            return_value=Path("/approved/sqlcmd"),
+        ), mock.patch.object(
+            dbctl,
+            "client_environment",
+            side_effect=client_environment,
+        ), mock.patch.object(
+            dbctl,
+            "run_nonproduction_client",
+            return_value=(result, 1),
+        ), mock.patch(
+            "sys.stdout"
+        ):
+            exit_code = dbctl.run_database_command(
+                ["ping", "sample-project", "backend-test"],
+                json_output=True,
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(observed, [("", "SYNTHETIC_SECRET")])
 
     def test_failed_query_suppresses_client_output_and_sqlcmd_environment(self) -> None:
         sql_file = self.query_root / "failed.sql"
@@ -800,6 +1360,7 @@ class DbctlTestCase(unittest.TestCase):
                     "--file",
                     str(sql_file),
                     "--confirm-write",
+                    "--confirm-idempotent-retry",
                     "--allow-production",
                 ]
             )
@@ -956,6 +1517,7 @@ class DbctlTestCase(unittest.TestCase):
                     "--file",
                     str(sql_file),
                     "--confirm-write",
+                    "--confirm-idempotent-retry",
                     "--allow-production",
                 ]
             )

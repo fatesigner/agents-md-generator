@@ -58,7 +58,7 @@ Do not expose or invent a credential `get` CLI. Password retrieval exists only i
 
 The launcher uses `/usr/bin/security` with a fixed service and the derived account. For setup it passes a bare final `-w`, allowing the system command to prompt. It never passes the password as a `-w` argument.
 
-Lookup output is captured inside the controlled launcher and passed only to the selected native client child process through `SQLCMDPASSWORD` for SQL Server or `PGPASSWORD` for PostgreSQL. It is never copied to normal output or error streams.
+Lookup output is captured inside the shared `dbctl` core, whether hosted by the CLI or local STDIO MCP process, and passed only to the selected native client child process through `SQLCMDPASSWORD` for SQL Server or `PGPASSWORD` for PostgreSQL. It is never copied to MCP content, normal output, or error streams.
 
 ## Windows Credential Manager
 
@@ -68,6 +68,6 @@ The launcher uses the Unicode Advapi32 Credential API with `CRED_TYPE_GENERIC` a
 
 ## Residual runtime exposure
 
-System stores protect credentials at rest. Database authentication still requires the launcher to materialize the password briefly in process memory and in the environment of the single native-client child process. Do not claim hardware-backed isolation or protection from a malicious process already running as the same user.
+System stores protect credentials at rest. Database authentication still requires the CLI or persistent local MCP process to materialize the password briefly in core memory and in the environment of the single native-client child process. Clear the inline profile field and child environment as soon as possible, but do not claim guaranteed Python-memory erasure, hardware-backed isolation, or protection from a malicious process already running as the same user.
 
 Clear process-local references immediately after use, suppress raw client errors, and never enable shell or PowerShell tracing around credential operations.
