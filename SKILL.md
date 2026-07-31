@@ -143,6 +143,7 @@ When the task requires syncing this skill package's global assets to the user-le
   - when `operate-database-profiles` is configured as a local plugin in the default personal marketplace, rebuilds its plugin source from the canonical skill, assigns a fresh Codex cachebuster, and reinstalls it with `codex plugin add`
   - skips plugin installation when that personal marketplace entry is absent, rather than creating or rewriting marketplace configuration implicitly
   - accepts `--check` for read-only drift detection and `--overwrite-runtime-drift` for explicitly replacing reviewed managed runtime or plugin-source drift
+  - the Windows entry uses the dedicated core Python runtime and pauses before exit so Explorer launches retain the result; set `SYNC_CODEX_ASSETS_NO_PAUSE=1` for non-interactive callers
   - requires a new Codex task after plugin refresh so the new MCP process and tool definitions are loaded
 
 ## Inheritance model

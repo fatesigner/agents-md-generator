@@ -38,6 +38,27 @@ class SyncCodexAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "usage"):
             parse_mode(["--force"])
 
+    def test_windows_entry_uses_dedicated_runtime_and_preserves_result(self) -> None:
+        entry_script = (SCRIPTS.parent / "sync_codex_assets.cmd").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            r'set "PYTHON=%USERPROFILE%\Programs\1_develop\python-tools'
+            r'\.runtime\.venv\Scripts\python.exe"',
+            entry_script,
+        )
+        self.assertNotIn("where py.exe", entry_script)
+        self.assertNotIn("where python.exe", entry_script)
+        self.assertIn('set "SYNC_EXIT_CODE=%ERRORLEVEL%"', entry_script)
+        self.assertIn(
+            'if /i "%SYNC_CODEX_ASSETS_NO_PAUSE%"=="1" goto :exit',
+            entry_script,
+        )
+        self.assertIn("pause", entry_script)
+        self.assertEqual(entry_script.lower().count("exit /b"), 1)
+        self.assertLess(entry_script.index("\n:finish\n"), entry_script.rindex("exit /b"))
+
     def test_compare_tree_detects_managed_content_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
