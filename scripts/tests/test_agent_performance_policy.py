@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -38,6 +39,9 @@ class AgentPerformancePolicyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.workflow_policy = (
             PROJECT_ROOT / "references" / "workflow-policy.md"
+        ).read_text(encoding="utf-8")
+        self.subagents_readme = (
+            PROJECT_ROOT / "subagents-main" / "README.md"
         ).read_text(encoding="utf-8")
 
     def test_global_template_keeps_adaptive_parallelism_lazy(self) -> None:
@@ -75,6 +79,90 @@ class AgentPerformancePolicyTests(unittest.TestCase):
                 self.assertEqual(len(matches), 1)
 
         self.assertIn("`explorer`、`worker`", self.subagents_policy)
+
+    def test_subagent_assets_use_explicit_model_tiers(self) -> None:
+        roles_by_model: dict[str, set[str]] = {}
+        roles_by_model_effort: dict[tuple[str, str], set[str]] = {}
+        configs_by_role: dict[str, dict[str, object]] = {}
+        for path in (PROJECT_ROOT / "subagents-main").rglob("*.toml"):
+            config = tomllib.loads(path.read_text(encoding="utf-8"))
+            role = config["name"]
+            model = config["model"]
+            effort = config["model_reasoning_effort"]
+            roles_by_model.setdefault(model, set()).add(role)
+            roles_by_model_effort.setdefault((model, effort), set()).add(role)
+            configs_by_role[role] = config
+
+        self.assertEqual(
+            {model: len(roles) for model, roles in roles_by_model.items()},
+            {
+                "gpt-5.6-sol": 49,
+                "gpt-5.6-terra": 87,
+                "gpt-5.6-luna": 2,
+            },
+        )
+        self.assertEqual(
+            {
+                model_effort: len(roles)
+                for model_effort, roles in roles_by_model_effort.items()
+            },
+            {
+                ("gpt-5.6-luna", "medium"): 2,
+                ("gpt-5.6-terra", "low"): 1,
+                ("gpt-5.6-terra", "medium"): 63,
+                ("gpt-5.6-terra", "high"): 23,
+                ("gpt-5.6-sol", "high"): 48,
+                ("gpt-5.6-sol", "xhigh"): 1,
+            },
+        )
+        self.assertEqual(
+            roles_by_model["gpt-5.6-luna"],
+            {"refactoring-specialist", "test-automator"},
+        )
+        self.assertEqual(
+            roles_by_model_effort[("gpt-5.6-sol", "xhigh")],
+            {"decision-arbiter"},
+        )
+        self.assertEqual(
+            configs_by_role["decision-arbiter"]["sandbox_mode"],
+            "read-only",
+        )
+        for role in (
+            "architect-reviewer",
+            "deployment-engineer",
+            "incident-responder",
+            "it-ops-orchestrator",
+            "payment-integration",
+            "security-auditor",
+        ):
+            with self.subTest(model="sol", role=role):
+                self.assertIn(role, roles_by_model["gpt-5.6-sol"])
+        for role in (
+            "backend-developer",
+            "browser-debugger",
+            "frontend-developer",
+            "python-pro",
+        ):
+            with self.subTest(model="terra", role=role):
+                self.assertIn(role, roles_by_model["gpt-5.6-terra"])
+
+    def test_subagent_readme_describes_the_installed_model_ladder(self) -> None:
+        self.assertIn(
+            "The awesome collection of 138 Codex subagents",
+            self.subagents_readme,
+        )
+        for marker in (
+            "| Focused | `gpt-5.6-luna` + `medium`",
+            "| Fast | `gpt-5.6-terra` + `medium`",
+            "| Balanced | `gpt-5.6-terra` + `high`",
+            "| Deep | `gpt-5.6-sol` + `high`",
+            "| Arbiter | `gpt-5.6-sol` + `xhigh`",
+            "Escalation happens at a new spawn boundary",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.subagents_readme)
+        self.assertNotIn("| Balanced | `gpt-5.6` +", self.subagents_readme)
+        self.assertNotIn("| Deep | `gpt-5.6` +", self.subagents_readme)
 
     def test_global_template_discovers_lazy_performance_references(self) -> None:
         discovered = {
@@ -159,16 +247,55 @@ class AgentPerformancePolicyTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.workflow_policy)
 
-    def test_performance_policy_routes_reasoning_without_global_xhigh(self) -> None:
-        self.assertIn("主代理普通任务默认使用 `high`", self.performance_policy)
+    def test_performance_policy_uses_quality_gate_and_tiered_model_routing(
+        self,
+    ) -> None:
+        self.assertIn(
+            "先定义结果、正确性、安全性与验证覆盖的最低门槛",
+            self.performance_policy,
+        )
+        self.assertIn("单位合格结果成本", self.performance_policy)
+        self.assertIn("宿主已暴露相应模型", self.performance_policy)
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            with self.subTest(model=model):
+                self.assertIn(model, self.performance_policy)
         self.assertIn("Plan mode 使用 `xhigh`", self.performance_policy)
         self.assertIn("至少两个复杂度信号", self.performance_policy)
         self.assertIn("两次实质性错误路径", self.performance_policy)
         self.assertIn("等待时间不是推理复杂度信号", self.performance_policy)
         self.assertIn("Fast mode", self.performance_policy)
+        self.assertIn("不代表更高智能或更高正确率", self.performance_policy)
         self.assertIn("不把 `xhigh`", self.performance_policy)
+        self.assertIn(
+            "不得声称同一运行中的 subagent 已被热切换",
+            self.performance_policy,
+        )
+        self.assertIn("只读 `decision-arbiter`", self.performance_policy)
         self.assertIn("token/credit", self.performance_policy)
         self.assertIn("返工次数", self.performance_policy)
+
+    def test_subagent_policy_uses_capability_gated_tiered_model_routing(
+        self,
+    ) -> None:
+        self.assertIn("当前宿主和调用方式已暴露对应模型", self.subagents_policy)
+        self.assertIn(
+            "用户可选模型等同于 subagent 可覆盖模型",
+            self.subagents_policy,
+        )
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            with self.subTest(model=model):
+                self.assertIn(model, self.subagents_policy)
+        self.assertIn(
+            "不得通过增加更多低层级 subagents 补偿质量问题",
+            self.subagents_policy,
+        )
+        self.assertIn(
+            "动态路由必须发生在新建下一次 subagent 调用的边界",
+            self.subagents_policy,
+        )
+        self.assertIn("Luna -> Terra、Terra -> Sol high", self.subagents_policy)
+        self.assertIn("统一使用只读 `decision-arbiter`", self.subagents_policy)
+        self.assertNotIn("默认允许运行时升级到 `xhigh`", self.subagents_policy)
 
     def test_global_rules_and_lazy_references_sync_in_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -218,6 +345,18 @@ class AgentPerformancePolicyTests(unittest.TestCase):
             self.assertGreater(subagent_count, 100)
             self.assertGreaterEqual(skill_count, 4)
             self.assertTrue((target_root / "agents" / "reviewer.toml").is_file())
+            self.assertEqual(subagent_count, 138)
+            self.assertEqual(
+                (target_root / "agents" / "decision-arbiter.toml").read_text(
+                    encoding="utf-8"
+                ),
+                (
+                    PROJECT_ROOT
+                    / "subagents-main"
+                    / "09-meta-orchestration"
+                    / "decision-arbiter.toml"
+                ).read_text(encoding="utf-8"),
+            )
             runtime_skill_target = target_root / "skills" / "agents-md-generator"
             self.assertTrue(
                 (runtime_skill_target / "scripts" / "sync_codex_assets.py").is_file()

@@ -7,6 +7,7 @@ Included agents:
 - `agent-installer` - Help pick and install agents from this repository.
 - `agent-organizer` - Pick the right subagents and divide the work cleanly.
 - `context-manager` - Produce a compact project context packet for other agents.
+- `decision-arbiter` - Resolve one converged, high-error-cost decision with read-only Sol xhigh reasoning.
 - `error-coordinator` - Group and prioritize multiple error threads.
 - `it-ops-orchestrator` - Coordinate cross-domain IT and operations workflows.
 - `knowledge-synthesizer` - Merge findings from multiple agents into a usable summary.

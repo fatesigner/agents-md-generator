@@ -85,13 +85,17 @@
 ## 模型与推理强度
 
 - `[MUST]` 子代理模型控制优先级：平台/系统固定绑定 > 角色级固定绑定 > 运行时 `model` / `reasoning_effort` > 子代理默认配置。
-- `[DEFAULT]` 首轮审查、范围收敛、只读探索、需求整理和上下文压缩优先 `gpt-5.6-terra` + `medium`；边界明确且速度优先时可降为 `low`。
-- `[DEFAULT]` 常规实现、测试补全、构建修复优先 `gpt-5.6` + `medium`；架构、安全、支付、生产事故和深度调试优先 `gpt-5.6` + `high`。
+- `[MUST]` 角色文件已固定 `model` 或 `model_reasoning_effort` 时，该字段按官方优先级覆盖 spawn 值；不得声称同一运行中的 subagent 已热切换，动态路由必须发生在新建下一次 subagent 调用的边界。
+- `[MUST]` 显式选择模型前确认当前宿主和调用方式已暴露对应模型；不可用时不得猜测相近名称或把用户可选模型等同于 subagent 可覆盖模型，应保留角色固定模型或回退到已验证层级。
+- `[DEFAULT]` 未收敛入口、关键方案、复杂根因、高错误成本裁决和关键证据冲突优先 `gpt-5.6-sol` 或宿主等价 frontier 模型。
+- `[DEFAULT]` 范围基本收敛但仍需日常综合判断的首轮审查、需求整理、常规实现和分析优先 `gpt-5.6-terra` + `medium`；边界明确且速度优先时可降为 `low`。
+- `[DEFAULT]` 输入输出契约明确、风险较低且可通过目标测试或结构化验收验证的机械实现、测试补全、批处理和后台任务，可在宿主支持时使用 `gpt-5.6-luna` + `low` 或 `medium`。
+- `[MUST]` Luna 或 Terra 产出出现需求歧义、目标验证失败、关键约束遗漏或高风险信号时，仅使用同一有界职责面新建相邻层级角色：Luna -> Terra、Terra -> Sol high；不得通过增加更多低层级 subagents 补偿质量问题。
 - `[MUST]` `xhigh` 仅用于已收敛问题的裁决阶段，不用于首轮探索、宽范围审查或开放式研究。
 - `[MUST]` 升级到 `xhigh` 前，范围必须收敛到有界文件集、单一风险主题、单一故障链路或单一架构决策点。
 - `[MUST]` 同一用户任务默认最多 1 个 `xhigh` 子代理；确需多个时在交付中说明边界差异与收益。
-- `[MUST]` 仅 `debugger`、`security-auditor`、`penetration-tester`、`architect-reviewer`、`incident-responder`、`devops-incident-responder`、`fintech-engineer`、`payment-integration`、`microservices-architect`、`llm-architect` 默认允许运行时升级到 `xhigh`。
-- `[DEFAULT]` `reviewer`、`security-engineer`、`cloud-architect`、`sre-engineer`、`database-administrator`、`performance-engineer`、`api-designer`、`quant-analyst`、`mlops-engineer` 仅在复杂收敛场景下条件性升级到 `xhigh`。
+- `[MUST]` `Sol + xhigh` 子代理统一使用只读 `decision-arbiter`；Sol high 专项角色先收敛证据和备选结论，再把唯一未决裁决交给该角色，不直接覆盖原角色 reasoning。
+- `[MUST]` `decision-arbiter` 不做首轮调查、宽范围搜索、代码写入、批量验证或继续委派；范围未收敛时必须返回需要补齐的证据或边界，不强行裁决。
 
 ## Spawn、等待与降级
 

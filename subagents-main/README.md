@@ -6,7 +6,7 @@
 <br />
 
 <div align="center">
-    <strong>The awesome collection of 136+ Codex subagents across 10 categories.</strong>
+    <strong>The awesome collection of 138 Codex subagents across 10 categories.</strong>
     <br />
     <br />
 </div>
@@ -15,7 +15,7 @@
 <div align="center">
     
 [![Awesome](https://awesome.re/badge.svg)](https://awesome.re)
-![Subagent Count](https://img.shields.io/badge/subagents-136-blue?style=classic)
+![Subagent Count](https://img.shields.io/badge/subagents-138-blue?style=classic)
 [![Last Update](https://img.shields.io/github/last-commit/VoltAgent/awesome-codex-subagents?label=Last%20update&style=classic)](https://github.com/VoltAgent/awesome-codex-subagents)
 [![Discord](https://img.shields.io/discord/1361559153780195478.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://s.voltagent.dev/discord)
 
@@ -100,14 +100,16 @@ Each subagent includes `model` and `model_reasoning_effort` fields that route it
 
 | Tier | Configuration | When It's Used | Examples |
 |------|---------------|----------------|----------|
+| Focused | `gpt-5.6-luna` + `medium` | Clear, repeatable, low-risk work with objective tests or structured acceptance criteria | `test-automator`, `refactoring-specialist` |
 | Lite | `gpt-5.6-terra` + `low` | Narrow, well-scoped work where low latency matters more than depth | `ui-fixer-lite` |
 | Fast | `gpt-5.6-terra` + `medium` | First-pass, lightweight, bounded, and upgradeable work: fast scanning, synthesis, scope narrowing, readonly exploration, lightweight planning/orchestration, high-signal review, and lighter research tasks | `search-specialist`, `research-analyst`, `agent-organizer`, `reviewer-lite`, `code-mapper` |
-| Balanced | `gpt-5.6` + `medium` | Structured implementation support, QA/review planning, and moderate-complexity analysis | `build-engineer`, `code-reviewer`, `qa-expert` |
-| Deep | `gpt-5.6` + `high` | Deep reasoning for architecture, security, infrastructure, and high-risk debugging | `security-auditor`, `architect-reviewer`, `fintech-engineer` |
+| Balanced | `gpt-5.6-terra` + `high` | Structured implementation, framework work, and bounded analysis with multiple edge cases | `backend-developer`, `frontend-developer`, `data-engineer` |
+| Deep | `gpt-5.6-sol` + `high` | Deep reasoning for architecture, security, infrastructure, and high-risk debugging | `security-auditor`, `architect-reviewer`, `fintech-engineer` |
+| Arbiter | `gpt-5.6-sol` + `xhigh` | One converged, high-error-cost decision after evidence and alternatives have been narrowed | `decision-arbiter` |
 
-Fast-tier agents should produce a clear upgrade signal when the task touches security, payments, authentication/authorization, production incidents, destructive database changes, architecture boundaries, complex debugging, shared contracts, cross-module writes, or final merge/release decisions.
+Focused and Fast agents should produce a clear upgrade signal when the task touches security, payments, authentication/authorization, production incidents, destructive database changes, architecture boundaries, complex debugging, shared contracts, cross-module writes, or final merge/release decisions.
 
-Prefer a two-step route for uncertain work: use `gpt-5.6-terra` agents to identify candidate files, likely risks, and the narrowest useful review scope, then escalate the highest-risk files or single decision point to a Balanced or Deep agent.
+Escalation happens at a new spawn boundary, not by hot-switching a running custom agent. Keep the same bounded responsibility and move only the affected work through Luna -> Terra -> Sol high. Use `decision-arbiter` only when one high-error-cost decision remains after the evidence and alternatives are already narrowed.
 
 ### Sandbox Mode Philosophy
 
@@ -293,13 +295,14 @@ DevOps, cloud, and deployment specialists.
 </details>
 
 <details>
-<summary><b>09. Meta & Orchestration</b> — Agent coordination and meta-programming (12 agents)</summary>
+<summary><b>09. Meta & Orchestration</b> — Agent coordination and meta-programming (12 entries)</summary>
 
 ### [09. Meta & Orchestration](09-meta-orchestration/)
 
 - [**agent-installer**](09-meta-orchestration/agent-installer.toml) - Browse and install agents from this repository via GitHub
 - [**agent-organizer**](09-meta-orchestration/agent-organizer.toml) - Multi-agent coordinator
 - [**context-manager**](09-meta-orchestration/context-manager.toml) - Context optimization expert
+- [**decision-arbiter**](09-meta-orchestration/decision-arbiter.toml) - Final read-only arbitration for one converged high-error-cost decision
 - [**error-coordinator**](09-meta-orchestration/error-coordinator.toml) - Error handling and recovery specialist
 - [**it-ops-orchestrator**](09-meta-orchestration/it-ops-orchestrator.toml) - IT operations workflow orchestration specialist
 - [**knowledge-synthesizer**](09-meta-orchestration/knowledge-synthesizer.toml) - Knowledge aggregation expert
@@ -341,8 +344,8 @@ Subagents come equipped with carefully crafted instructions tailored to their ar
 **Shared Across Projects**
 After creating a subagent, you can utilize it throughout various projects and distribute it among team members to ensure consistent development practices.
 
-**Explicit Delegation**
-Codex does not spawn subagents automatically. Use explicit delegation prompts to specify which agents to spawn, how to divide the work, and what shape the result should take.
+**Controlled Delegation**
+Codex can delegate after a direct request or when applicable `AGENTS.md` or skill instructions request it. Installing a custom agent alone does not trigger it; define the independent work, ownership boundary, and expected result shape.
 
 ### Core Advantages
 
