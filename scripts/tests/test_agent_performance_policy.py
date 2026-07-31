@@ -40,6 +40,9 @@ class AgentPerformancePolicyTests(unittest.TestCase):
         self.workflow_policy = (
             PROJECT_ROOT / "references" / "workflow-policy.md"
         ).read_text(encoding="utf-8")
+        self.tool_report_policy = (
+            PROJECT_ROOT / "references" / "tool-report-policy.md"
+        ).read_text(encoding="utf-8")
         self.subagents_readme = (
             PROJECT_ROOT / "subagents-main" / "README.md"
         ).read_text(encoding="utf-8")
@@ -54,6 +57,13 @@ class AgentPerformancePolicyTests(unittest.TestCase):
         self.assertIn("首批默认 1 个 subagent", self.subagents_policy)
         self.assertNotIn("速度优先的强触发分发", self.global_template)
         self.assertNotIn("多面任务默认 2-4 个 subagents", self.global_template)
+
+    def test_tool_report_policy_omits_only_disabled_named_mcp_tools(self) -> None:
+        self.assertNotIn("sequential-thinking", self.tool_report_policy)
+        self.assertNotIn("shrimp-task-manager", self.tool_report_policy)
+        self.assertIn("context7", self.tool_report_policy)
+        self.assertIn("PyMuPDF", self.tool_report_policy)
+        self.assertIn("exec_command", self.tool_report_policy)
 
     def test_subagent_policy_uses_current_context_parameter(self) -> None:
         self.assertIn("### 自适应触发矩阵", self.subagents_policy)
