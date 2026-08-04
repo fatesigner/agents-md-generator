@@ -1,0 +1,48 @@
+# Shared Codex user defaults for macOS and Windows.
+#
+# sync_codex_assets combines this baseline with the shared MCP fragment, the
+# target-platform MCP fragment, the ignored local MCP secret fragment, and the
+# optional ignored local config overlay. The deterministic result is written to
+# ${CODEX_HOME}/config.toml (default ~/.codex/config.toml) on both platforms.
+# Keep only settings that should be identical across every synchronized machine.
+# Never store credentials, secrets, project trust entries, or machine-specific paths here.
+#
+# The active values below are the portable, documented subset reviewed from the
+# primary macOS user configuration. Local overrides are applied last, so changes
+# here define defaults rather than an administrator-enforced policy layer.
+
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+plan_mode_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+model_verbosity = "high"
+model_supports_reasoning_summaries = true
+hide_agent_reasoning = false
+hide_rate_limit_model_nudge = true
+suppress_unstable_features_warning = true
+disable_response_storage = true
+web_search = "live"
+personality = "pragmatic"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+approvals_reviewer = "user"
+service_tier = "priority"
+startup_timeout_sec = 60
+tool_timeout_sec = 60
+
+[sandbox_workspace_write]
+network_access = true
+exclude_slash_tmp = false
+
+[features]
+shell_snapshot = true
+goals = true
+memories = true
+background_terminal = true
+js_repl = false
+unified_exec = true
+
+[memories]
+generate_memories = true
+use_memories = true
+disable_on_external_context = true

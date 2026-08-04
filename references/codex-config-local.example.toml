@@ -1,0 +1,11 @@
+# Optional machine-local Codex overrides.
+#
+# Copy this file to .codex/config.local.toml in the source checkout, keep the
+# real file out of Git, and set mode 0600 on macOS. Values in this file merge
+# last and may override shared defaults or add machine-specific MCP servers.
+# Leave the file absent when no machine-local overrides are needed.
+#
+# Example:
+# [mcp_servers.my-local-tool]
+# command = "/absolute/or-platform-specific/path/to/my-local-tool"
+# enabled = true

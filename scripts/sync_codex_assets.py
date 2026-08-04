@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import json
+import math
 import os
 import re
 import shutil
@@ -9,9 +11,11 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
+
+import tomllib
 
 import build_operate_database_profiles_plugin as plugin_builder
 
@@ -29,6 +33,14 @@ PROJECT_SKILL_ASSETS = (
 PROJECT_SKILL_ASSET_EXCLUDES: dict[str, tuple[str, ...]] = {}
 RUNTIME_IGNORED_NAMES = {"__pycache__", ".DS_Store"}
 RUNTIME_IGNORED_SUFFIXES = {".pyc", ".pyo"}
+CONFIG_PLATFORMS = {"macos", "windows"}
+BARE_TOML_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+MCP_SECRET_PLACEHOLDERS = (
+    "***redacted***",
+    "changeme",
+    "replace-me",
+    "replace_me",
+)
 
 
 class DriftItem(NamedTuple):
@@ -44,6 +56,54 @@ class ManagedPlugin(NamedTuple):
 
 def default_codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+
+
+def default_config_platform(
+    os_name: str | None = None,
+    sys_platform_name: str | None = None,
+) -> str:
+    effective_os_name = os.name if os_name is None else os_name
+    effective_sys_platform = (
+        sys.platform if sys_platform_name is None else sys_platform_name
+    )
+    if effective_os_name == "nt" or effective_sys_platform.startswith("win"):
+        return "windows"
+    if effective_os_name == "posix" and effective_sys_platform == "darwin":
+        return "macos"
+    raise ValueError(
+        "Unsupported operating system for Codex configuration: "
+        f"os.name={effective_os_name}, sys.platform={effective_sys_platform}"
+    )
+
+
+def default_codex_config_target(codex_home: Path) -> Path:
+    return (codex_home / "config.toml").resolve()
+
+
+def default_mcp_secret_source(
+    project_root: Path = PROJECT_ROOT,
+) -> Path:
+    return project_root / ".codex" / "mcp-secrets.toml"
+
+
+def default_local_config_source(
+    project_root: Path = PROJECT_ROOT,
+) -> Path:
+    return project_root / ".codex" / "config.local.toml"
+
+
+def config_source_paths(
+    platform_name: str,
+    project_root: Path = PROJECT_ROOT,
+) -> tuple[Path, Path, Path]:
+    if platform_name not in CONFIG_PLATFORMS:
+        raise ValueError(f"Unsupported config platform: {platform_name}")
+    references_dir = project_root / "references"
+    return (
+        references_dir / "codex-config-base.toml",
+        references_dir / "codex-mcp-servers.common.toml",
+        references_dir / f"codex-mcp-servers.{platform_name}.toml",
+    )
 
 
 def default_personal_marketplace() -> Path:
@@ -378,6 +438,233 @@ def normalized_global_content(source: Path) -> bytes:
     return content.encode("utf-8")
 
 
+def load_toml_object(source: Path, label: str) -> dict[str, Any]:
+    source = ensure_file(source, label)
+    try:
+        parsed = tomllib.loads(source.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"{label} is not valid TOML: {source}: {error}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must contain a TOML document: {source}")
+    return parsed
+
+
+def require_private_posix_file(
+    source: Path,
+    label: str,
+    os_name: str | None = None,
+) -> None:
+    effective_os_name = os.name if os_name is None else os_name
+    if effective_os_name != "posix":
+        return
+    mode = stat.S_IMODE(source.stat().st_mode)
+    if mode & 0o077:
+        raise ValueError(
+            f"{label} permissions are too broad: {source}. "
+            "Set mode 0600 before syncing."
+        )
+
+
+def secret_value_is_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    return not normalized or any(
+        placeholder in normalized for placeholder in MCP_SECRET_PLACEHOLDERS
+    )
+
+
+def validate_mcp_secret_fragment(
+    source: Path,
+    configured_server_names: set[str],
+    os_name: str | None = None,
+) -> dict[str, Any]:
+    source = ensure_file(source, "Local MCP secret fragment")
+    require_private_posix_file(
+        source,
+        "Local MCP secret fragment",
+        os_name=os_name,
+    )
+    parsed = load_toml_object(source, "Local MCP secret fragment")
+    if set(parsed) != {"mcp_servers"}:
+        raise ValueError(
+            "Local MCP secret fragment may contain only the mcp_servers table"
+        )
+    servers = parsed.get("mcp_servers")
+    if not isinstance(servers, dict) or not servers:
+        raise ValueError("Local MCP secret fragment has no MCP secret tables")
+    for server_name, server_config in servers.items():
+        if server_name not in configured_server_names:
+            raise ValueError(
+                "Local MCP secret fragment references an unconfigured MCP server: "
+                f"{server_name}"
+            )
+        if not isinstance(server_config, dict) or not server_config:
+            raise ValueError("Local MCP secret fragment has no MCP secret tables")
+        unexpected_fields = set(server_config) - {"env", "http_headers"}
+        if unexpected_fields:
+            names = ", ".join(sorted(unexpected_fields))
+            raise ValueError(
+                f"MCP secret table {server_name} contains forbidden fields: {names}"
+            )
+        for field_name, values in server_config.items():
+            if not isinstance(values, dict) or not values:
+                raise ValueError(
+                    f"MCP secret table {server_name}.{field_name} must be non-empty"
+                )
+            for key, value in values.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise ValueError(
+                        f"MCP secret value {server_name}.{field_name} must be a string"
+                    )
+                if secret_value_is_placeholder(value):
+                    raise ValueError(
+                        "MCP secret value is empty or still uses a placeholder: "
+                        f"{server_name}.{field_name}.{key}"
+                    )
+    return parsed
+
+
+def deep_merge_config(
+    destination: dict[str, Any],
+    overlay: dict[str, Any],
+) -> dict[str, Any]:
+    for key, value in overlay.items():
+        existing = destination.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            deep_merge_config(existing, value)
+        else:
+            destination[key] = copy.deepcopy(value)
+    return destination
+
+
+def toml_key(key: str) -> str:
+    if BARE_TOML_KEY_PATTERN.fullmatch(key):
+        return key
+    return json.dumps(key, ensure_ascii=False)
+
+
+def toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return repr(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        entries = ", ".join(
+            f"{toml_key(str(key))} = {toml_value(child)}"
+            for key, child in value.items()
+        )
+        return "{ " + entries + " }"
+    raise ValueError(f"Unsupported TOML value type: {type(value).__name__}")
+
+
+def append_toml_table(
+    lines: list[str],
+    path: tuple[str, ...],
+    table: dict[str, Any],
+) -> None:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append("[" + ".".join(toml_key(part) for part in path) + "]")
+    for key, value in table.items():
+        if not isinstance(value, dict):
+            lines.append(f"{toml_key(str(key))} = {toml_value(value)}")
+    for key, value in table.items():
+        if isinstance(value, dict):
+            append_toml_table(lines, path + (str(key),), value)
+
+
+def serialize_toml_document(config: dict[str, Any]) -> str:
+    lines = [
+        "# Generated by sync_codex_assets. Edit the repository source fragments,",
+        "# .codex/mcp-secrets.toml, or .codex/config.local.toml instead.",
+        "",
+    ]
+    for key, value in config.items():
+        if not isinstance(value, dict):
+            lines.append(f"{toml_key(str(key))} = {toml_value(value)}")
+    for key, value in config.items():
+        if isinstance(value, dict):
+            append_toml_table(lines, (str(key),), value)
+    rendered = "\n".join(lines).rstrip() + "\n"
+    try:
+        reparsed = tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"Rendered Codex config is not valid TOML: {error}") from error
+    if reparsed != config:
+        raise ValueError("Rendered Codex config does not round-trip to the merged values")
+    return rendered
+
+
+def render_codex_config(
+    source_files: Iterable[Path],
+    secret_source: Path,
+    local_source: Path | None = None,
+    managed_plugin: ManagedPlugin | None = None,
+    os_name: str | None = None,
+) -> bytes:
+    merged: dict[str, Any] = {}
+    configured_server_names: set[str] = set()
+    for source_file in source_files:
+        fragment = load_toml_object(source_file, "Codex config source fragment")
+        servers = fragment.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            raise ValueError(f"mcp_servers must be a table: {source_file}")
+        configured_server_names.update(str(name) for name in servers)
+        deep_merge_config(merged, fragment)
+    if not configured_server_names:
+        raise ValueError("Codex config source fragments declare no MCP servers")
+
+    local_overlay: dict[str, Any] | None = None
+    if local_source is not None and local_source.is_file():
+        require_private_posix_file(
+            local_source,
+            "Local Codex config overlay",
+            os_name=os_name,
+        )
+        local_overlay = load_toml_object(
+            local_source,
+            "Local Codex config overlay",
+        )
+        local_servers = local_overlay.get("mcp_servers", {})
+        if not isinstance(local_servers, dict):
+            raise ValueError(f"mcp_servers must be a table: {local_source}")
+        configured_server_names.update(str(name) for name in local_servers)
+
+    deep_merge_config(
+        merged,
+        validate_mcp_secret_fragment(
+            secret_source, configured_server_names, os_name=os_name
+        )
+    )
+    if managed_plugin is not None:
+        deep_merge_config(
+            merged,
+            {
+                "plugins": {
+                    f"{managed_plugin.name}@{managed_plugin.marketplace}": {
+                        "enabled": True,
+                    }
+                }
+            },
+        )
+    if local_overlay is not None:
+        deep_merge_config(merged, local_overlay)
+    return serialize_toml_document(merged).encode("utf-8")
+
+
 def compare_global_rule(source: Path, target: Path, label: str) -> list[DriftItem]:
     if not target.is_file():
         return [DriftItem(f"{label}: missing target", target.exists())]
@@ -386,8 +673,26 @@ def compare_global_rule(source: Path, target: Path, label: str) -> list[DriftIte
     return []
 
 
+def compare_codex_config(
+    expected_content: bytes,
+    target: Path,
+) -> list[DriftItem]:
+    if not target.is_file():
+        return [
+            DriftItem(
+                "config/config.toml: missing target",
+                target.exists(),
+            )
+        ]
+    if expected_content != target.read_bytes():
+        return [DriftItem("config/config.toml: content differs", True)]
+    return []
+
+
 def find_managed_drift(
     *,
+    codex_config_content: bytes,
+    codex_config_target: Path,
     global_source: Path,
     global_targets: Iterable[Path],
     references_source_dir: Path,
@@ -397,7 +702,7 @@ def find_managed_drift(
     skills_source_dir: Path,
     skills_target_dir: Path,
 ) -> list[DriftItem]:
-    drift: list[DriftItem] = []
+    drift = compare_codex_config(codex_config_content, codex_config_target)
     for target in global_targets:
         drift.extend(compare_global_rule(global_source, target, str(target)))
     for source_file in discover_global_references(global_source, references_source_dir):
@@ -420,6 +725,37 @@ def find_managed_drift(
         else:
             drift.extend(compare_tree(source_skill_dir, target_skill_dir, label))
     return drift
+
+
+def sync_codex_config(
+    content: bytes,
+    target_file: Path,
+) -> int:
+    print(f"codex_config_target: {target_file}")
+    temporary_path: Path | None = None
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{target_file.name}.",
+            dir=target_file.parent,
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(file_descriptor, "wb") as temporary_file:
+            temporary_file.write(content)
+        os.chmod(temporary_path, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temporary_path, target_file)
+        temporary_path = None
+        if os.name == "posix":
+            os.chmod(target_file, stat.S_IRUSR | stat.S_IWUSR)
+    except PermissionError as error:
+        raise ValueError(
+            f"Codex user config target is not writable: {target_file}."
+        ) from error
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    print(f"[copied] Codex user config -> {target_file}")
+    return 1
 
 
 def sync_global_rules(source_file: Path, target_file: Path) -> int:
@@ -626,6 +962,44 @@ def main() -> int:
     codex_home = default_codex_home().resolve()
     print(f"codex_home: {codex_home}")
 
+    config_platform = default_config_platform()
+    config_sources = tuple(
+        ensure_file(path, "Codex config source fragment")
+        for path in config_source_paths(config_platform)
+    )
+    mcp_secret_source = default_mcp_secret_source().resolve()
+    if not mcp_secret_source.is_file():
+        raise ValueError(
+            "Local MCP secret fragment does not exist: "
+            f"{mcp_secret_source}. Copy "
+            "references/codex-mcp-secrets.example.toml to "
+            ".codex/mcp-secrets.toml, replace every placeholder, and set mode 0600."
+        )
+    local_config_source = default_local_config_source().resolve()
+    personal_marketplace = default_personal_marketplace()
+    managed_plugin = discover_managed_plugin(personal_marketplace)
+    codex_config_content = render_codex_config(
+        config_sources,
+        mcp_secret_source,
+        local_source=local_config_source,
+        managed_plugin=managed_plugin,
+    )
+    codex_config_target = default_codex_config_target(codex_home)
+    print(f"codex_config_platform: {config_platform}")
+    for config_source in config_sources:
+        print(f"codex_config_source: {config_source}")
+    print(f"mcp_secret_source: {mcp_secret_source}")
+    if local_config_source.is_file():
+        print(f"local_config_source: {local_config_source}")
+    else:
+        print(f"[skipped] optional local config overlay: {local_config_source}")
+        if codex_config_target.is_file():
+            print(
+                "[warning] Existing user-only settings are not imported automatically. "
+                "Move settings that must survive replacement into the optional local "
+                "config overlay before syncing."
+            )
+    print(f"codex_config_target: {codex_config_target}")
     global_source = ensure_file(PROJECT_ROOT / "references" / "global-template.md", "Global source file")
     global_target = (codex_home / "AGENTS.md").resolve()
     gemini_global_target = (Path.home() / ".gemini" / "GEMINI.md").resolve()
@@ -635,8 +1009,6 @@ def main() -> int:
     subagents_target_dir = (codex_home / "agents").resolve()
     skills_source_dir = ensure_dir(PROJECT_ROOT / "skills", "Skills source directory")
     skills_target_dir = (codex_home / "skills").resolve()
-    personal_marketplace = default_personal_marketplace()
-    managed_plugin = discover_managed_plugin(personal_marketplace)
     if managed_plugin is None:
         print(
             "[skipped] managed plugin is not configured in the personal marketplace: "
@@ -650,6 +1022,8 @@ def main() -> int:
         )
 
     drift_arguments = {
+        "codex_config_content": codex_config_content,
+        "codex_config_target": codex_config_target,
         "global_source": global_source,
         "global_targets": [global_target, gemini_global_target],
         "references_source_dir": references_source_dir,
@@ -696,6 +1070,10 @@ def main() -> int:
             if managed_plugin is not None and codex_executable is not None
             else 0
         ),
+        "codex_config": sync_codex_config(
+            codex_config_content,
+            codex_config_target,
+        ),
     }
 
     remaining_drift = find_managed_drift(**drift_arguments)
@@ -710,6 +1088,7 @@ def main() -> int:
     for label, count in synced.items():
         print(f"synced_{label}: {count}")
     print("[OK] Sync completed.")
+    print("[ACTION] Restart Codex to load the refreshed user configuration.")
     if managed_plugin is not None:
         print(
             "[ACTION] Start a new Codex task to load the refreshed plugin MCP process."

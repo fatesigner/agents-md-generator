@@ -1,0 +1,18 @@
+# Shared streamable HTTP MCP servers for macOS and Windows.
+# .codex/config.local.toml may add or override machine-local MCP servers.
+
+[mcp_servers.cloudflare-api]
+url = "https://mcp.cloudflare.com/mcp"
+enabled = false
+
+[mcp_servers.cloudflare-docs]
+url = "https://docs.mcp.cloudflare.com/mcp"
+enabled = true
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/readonly"
+enabled = false
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+enabled = true
