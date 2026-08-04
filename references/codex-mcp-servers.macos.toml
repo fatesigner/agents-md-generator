@@ -1,0 +1,51 @@
+# macOS launch forms for the shared local MCP servers.
+# These commands intentionally expand $HOME inside zsh instead of storing a
+# machine-specific username in managed configuration.
+
+[mcp_servers.code-index]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.local/bin/code-index-mcp"']
+enabled = true
+startup_timeout_sec = 60.0
+
+[mcp_servers.context7]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/context7-mcp" --api-key "$CONTEXT7_API_KEY"']
+enabled = true
+startup_timeout_sec = 60.0
+
+[mcp_servers.deepwiki]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.local/bin/mcp-proxy" https://mcp.deepwiki.com/mcp --transport=streamablehttp']
+enabled = true
+startup_timeout_sec = 60.0
+
+[mcp_servers.memory]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/mcp-server-memory"']
+enabled = false
+startup_timeout_sec = 60.0
+
+[mcp_servers.playwright]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/playwright-mcp" --extension']
+enabled = false
+startup_timeout_sec = 60.0
+
+[mcp_servers.sequential-thinking]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/mcp-server-sequential-thinking"']
+enabled = false
+startup_timeout_sec = 60.0
+
+[mcp_servers.serena]
+command = "/bin/zsh"
+args = ["-lc", 'exec "$HOME/.local/bin/serena" start-mcp-server --context codex --enable-web-dashboard False']
+enabled = true
+startup_timeout_sec = 60.0
+
+[mcp_servers.shrimp-task-manager]
+command = "/bin/zsh"
+args = ["-lc", 'export DATA_DIR=".shrimp" ENABLE_GUI="false" TEMPLATES_USE="zh"; exec "$HOME/.nvm/versions/node/v22.22.3/bin/mcp-shrimp-task-manager"']
+enabled = false
+startup_timeout_sec = 60.0

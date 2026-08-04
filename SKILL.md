@@ -133,6 +133,11 @@ When the task requires syncing this skill package's global assets to the user-le
 - shell entry: `sync_codex_assets.sh`
 - Windows entry: `sync_codex_assets.cmd`
 - behavior:
+  - deterministically merges `references/codex-config-base.toml`, the common MCP fragment, the macOS or Windows MCP fragment, the ignored local `.codex/mcp-secrets.toml`, the enabled state of the locally configured managed plugin, and the optional ignored `.codex/config.local.toml` into `${CODEX_HOME}/config.toml` on both platforms (default `~/.codex/config.toml`)
+  - applies the optional local config overlay last, so it may override shared defaults or add machine-specific MCP servers without adding an MCP allowlist or `requirements.toml`; the shared macOS and Windows fragments declare the same MCP names and settings, while only their launcher commands and paths differ
+  - keeps credentials, project trust entries, and machine-specific paths out of tracked configuration; the repository tracks only `references/codex-mcp-secrets.example.toml` and `references/codex-config-local.example.toml`, while real local fragments stay under the Git-ignored `.codex/` directory and must use mode `0600` on macOS
+  - limits the dedicated secret fragment to `mcp_servers.<name>.env` and `mcp_servers.<name>.http_headers` string values; arbitrary machine-local settings belong in `.codex/config.local.toml`
+  - writes the generated user configuration atomically with private file permissions; drift checks report only missing/different state and never print secret values or a content diff
   - syncs `references/global-template.md` to `${CODEX_HOME:-~/.codex}/AGENTS.md`
   - syncs `references/global-template.md` to `~/.gemini/GEMINI.md`
   - syncs global policy references used by `references/global-template.md` into `${CODEX_HOME:-~/.codex}/references/`
@@ -140,10 +145,12 @@ When the task requires syncing this skill package's global assets to the user-le
   - syncs this top-level `agents-md-generator` skill runtime assets into `${CODEX_HOME:-~/.codex}/skills/agents-md-generator/`
   - includes the Python sync implementation and source subagents in the installed skill runtime package; keeps the macOS/Linux and Windows entry scripts in the source checkout only
   - syncs local nested `skills/*/` directories into `${CODEX_HOME:-~/.codex}/skills/`
-  - when `operate-database-profiles` is configured as a local plugin in the default personal marketplace, rebuilds its plugin source from the canonical skill, assigns a fresh Codex cachebuster, and reinstalls it with `codex plugin add`
+  - when `operate-database-profiles` is configured as a local plugin in the default personal marketplace, includes its enablement entry in the generated config, rebuilds its plugin source from the canonical skill, assigns a fresh Codex cachebuster, reinstalls it with `codex plugin add`, and writes the deterministic config after installation so the CLI side effect cannot create post-sync drift
   - skips plugin installation when that personal marketplace entry is absent, rather than creating or rewriting marketplace configuration implicitly
   - accepts `--check` for read-only drift detection and `--overwrite-runtime-drift` for explicitly replacing reviewed managed runtime or plugin-source drift
-  - the Windows entry uses the dedicated core Python runtime and pauses before exit so Explorer launches retain the result; set `SYNC_CODEX_ASSETS_NO_PAUSE=1` for non-interactive callers
+  - the Windows entry prefers `SYNC_CODEX_ASSETS_PYTHON`, then the dedicated core runtime, and then a version-checked Python 3.11+ `py.exe` or `python.exe` fallback; Python 3.11 is required for the standard-library TOML parser used by deterministic config merging; the entry pauses before exit so Explorer launches retain the result, while `SYNC_CODEX_ASSETS_NO_PAUSE=1` disables the pause for non-interactive callers
+  - expects the shared local MCP command shims documented by the platform fragments to be installed at their referenced user-relative paths; source/config validation does not prove those target-machine executables are present
+  - requires restarting Codex after refreshing the generated user configuration
   - requires a new Codex task after plugin refresh so the new MCP process and tool definitions are loaded
 
 ## Inheritance model
