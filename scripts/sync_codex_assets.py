@@ -946,7 +946,7 @@ def sync_skills(source_dir: Path, target_dir: Path) -> int:
 
 def parse_mode(argv: list[str]) -> str:
     if not argv:
-        return "sync"
+        return "overwrite"
     if argv == ["--check"]:
         return "check"
     if argv == ["--overwrite-runtime-drift"]:
@@ -1044,13 +1044,6 @@ def main() -> int:
             return 1
         print("[OK] Managed assets are byte-identical.")
         return 0
-    existing_drift = [item for item in drift if item.target_exists]
-    if existing_drift and mode != "overwrite":
-        raise ValueError(
-            "managed runtime drift detected; run --check, review the differences, "
-            "then use --overwrite-runtime-drift only when replacement is intended"
-        )
-
     codex_executable = find_codex_cli() if managed_plugin is not None else None
     synced = {
         "global": sync_global_rules(global_source, global_target),

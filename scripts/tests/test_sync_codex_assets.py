@@ -373,7 +373,7 @@ class SyncCodexAssetsTests(unittest.TestCase):
             self.assertIn("content differs", drift[0].label)
             self.assertTrue(drift[0].target_exists)
 
-    def test_main_requires_review_before_overwriting_codex_config(
+    def test_main_defaults_to_overwriting_codex_config_drift(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -455,11 +455,9 @@ class SyncCodexAssetsTests(unittest.TestCase):
                 ):
                     self.assertEqual(sync_module.main(), 1)
                 with patch.object(sys, "argv", ["sync_codex_assets.py"]):
-                    with self.assertRaisesRegex(
-                        ValueError,
-                        "managed runtime drift detected",
-                    ):
-                        sync_module.main()
+                    self.assertEqual(sync_module.main(), 0)
+
+                target.write_text("# local drift\n", encoding="utf-8")
                 with patch.object(
                     sys,
                     "argv",
@@ -479,8 +477,8 @@ class SyncCodexAssetsTests(unittest.TestCase):
                 ).exists()
             )
 
-    def test_parse_mode_requires_explicit_runtime_drift_override(self) -> None:
-        self.assertEqual(parse_mode([]), "sync")
+    def test_parse_mode_defaults_to_runtime_drift_overwrite(self) -> None:
+        self.assertEqual(parse_mode([]), "overwrite")
         self.assertEqual(parse_mode(["--check"]), "check")
         self.assertEqual(
             parse_mode(["--overwrite-runtime-drift"]),
