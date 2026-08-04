@@ -19,21 +19,9 @@ args = ["/d", "/s", "/c", 'call "%USERPROFILE%\.local\bin\mcp-proxy.exe" https:/
 enabled = true
 startup_timeout_sec = 60.0
 
-[mcp_servers.memory]
-command = "cmd.exe"
-args = ["/d", "/s", "/c", 'call "%APPDATA%\npm\mcp-server-memory.cmd"']
-enabled = false
-startup_timeout_sec = 60.0
-
 [mcp_servers.playwright]
 command = "cmd.exe"
 args = ["/d", "/s", "/c", 'call "%APPDATA%\npm\playwright-mcp.cmd" --extension']
-enabled = false
-startup_timeout_sec = 60.0
-
-[mcp_servers.sequential-thinking]
-command = "cmd.exe"
-args = ["/d", "/s", "/c", 'call "%APPDATA%\npm\mcp-server-sequential-thinking.cmd"']
 enabled = false
 startup_timeout_sec = 60.0
 
@@ -41,10 +29,4 @@ startup_timeout_sec = 60.0
 command = "cmd.exe"
 args = ["/d", "/s", "/c", 'call "%USERPROFILE%\.local\bin\serena.exe" start-mcp-server --context codex --enable-web-dashboard False']
 enabled = true
-startup_timeout_sec = 60.0
-
-[mcp_servers.shrimp-task-manager]
-command = "cmd.exe"
-args = ["/d", "/s", "/c", 'set "DATA_DIR=.shrimp" && set "ENABLE_GUI=false" && set "TEMPLATES_USE=zh" && call "%APPDATA%\npm\mcp-shrimp-task-manager.cmd"']
-enabled = false
 startup_timeout_sec = 60.0

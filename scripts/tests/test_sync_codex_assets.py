@@ -155,12 +155,9 @@ class SyncCodexAssetsTests(unittest.TestCase):
             "context7",
             "deepwiki",
             "github",
-            "memory",
             "openaiDeveloperDocs",
             "playwright",
-            "sequential-thinking",
             "serena",
-            "shrimp-task-manager",
         }
         self.assertEqual(set(rendered["macos"]["mcp_servers"]), expected_servers)
         self.assertEqual(set(rendered["windows"]["mcp_servers"]), expected_servers)

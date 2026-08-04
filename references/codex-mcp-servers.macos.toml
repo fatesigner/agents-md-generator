@@ -20,21 +20,9 @@ args = ["-lc", 'exec "$HOME/.local/bin/mcp-proxy" https://mcp.deepwiki.com/mcp -
 enabled = true
 startup_timeout_sec = 60.0
 
-[mcp_servers.memory]
-command = "/bin/zsh"
-args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/mcp-server-memory"']
-enabled = false
-startup_timeout_sec = 60.0
-
 [mcp_servers.playwright]
 command = "/bin/zsh"
 args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/playwright-mcp" --extension']
-enabled = false
-startup_timeout_sec = 60.0
-
-[mcp_servers.sequential-thinking]
-command = "/bin/zsh"
-args = ["-lc", 'exec "$HOME/.nvm/versions/node/v22.22.3/bin/mcp-server-sequential-thinking"']
 enabled = false
 startup_timeout_sec = 60.0
 
@@ -42,10 +30,4 @@ startup_timeout_sec = 60.0
 command = "/bin/zsh"
 args = ["-lc", 'exec "$HOME/.local/bin/serena" start-mcp-server --context codex --enable-web-dashboard False']
 enabled = true
-startup_timeout_sec = 60.0
-
-[mcp_servers.shrimp-task-manager]
-command = "/bin/zsh"
-args = ["-lc", 'export DATA_DIR=".shrimp" ENABLE_GUI="false" TEMPLATES_USE="zh"; exec "$HOME/.nvm/versions/node/v22.22.3/bin/mcp-shrimp-task-manager"']
-enabled = false
 startup_timeout_sec = 60.0
